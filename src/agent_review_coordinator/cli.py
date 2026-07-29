@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import sys
@@ -41,6 +43,18 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
     )
     disposition.add_argument("--rationale", required=True)
+    disposition.add_argument("--evidence")
+    disposition.add_argument("--duplicate-of")
+
+    reproduction = subparsers.add_parser("reproduction")
+    reproduction.add_argument("--ledger", type=Path, required=True)
+    reproduction.add_argument("--fingerprint", required=True)
+    reproduction.add_argument("--reproduction", required=True)
+
+    verification = subparsers.add_parser("verification")
+    verification.add_argument("--ledger", type=Path, required=True)
+    verification.add_argument("--fingerprint", required=True)
+    verification.add_argument("--passed", choices=["true", "false"], required=True)
 
     settle = subparsers.add_parser("settle")
     settle.add_argument("--policy", type=Path, required=True)
@@ -54,6 +68,20 @@ def _load_policy(path: Path) -> ReviewPolicy:
 
 def _load_ledger(path: Path) -> ReviewLedger:
     return ReviewLedger.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+@contextlib.contextmanager
+def _ledger_lock(path: Path):
+    """Serialize ledger read-modify-write operations across processes."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f"{path.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _write_ledger(path: Path, ledger: ReviewLedger) -> None:
@@ -92,26 +120,56 @@ def _slots(args: argparse.Namespace) -> int:
 
 def _submit(args: argparse.Namespace) -> int:
     result = ReviewResult.model_validate_json(args.result.read_text(encoding="utf-8"))
-    if args.ledger.exists():
-        ledger = _load_ledger(args.ledger)
-        if ledger.repository != args.repository or ledger.head_sha != args.head_sha:
-            raise ValueError("ledger identity does not match repository and head SHA")
-    else:
-        ledger = ReviewLedger(repository=args.repository, head_sha=args.head_sha)
-    ledger.submit(result)
-    _write_ledger(args.ledger, ledger)
+    with _ledger_lock(args.ledger):
+        if args.ledger.exists():
+            ledger = _load_ledger(args.ledger)
+            if ledger.repository != args.repository or ledger.head_sha != args.head_sha:
+                raise ValueError(
+                    "ledger identity does not match repository and head SHA"
+                )
+        else:
+            ledger = ReviewLedger(repository=args.repository, head_sha=args.head_sha)
+        ledger.submit(result)
+        _write_ledger(args.ledger, ledger)
     _print_json(ledger.model_dump(mode="json"))
     return 0
 
 
 def _disposition(args: argparse.Namespace) -> int:
-    ledger = _load_ledger(args.ledger)
-    ledger.record_disposition(
-        fingerprint=args.fingerprint,
-        disposition=Disposition(args.disposition),
-        rationale=args.rationale,
-    )
-    _write_ledger(args.ledger, ledger)
+    with _ledger_lock(args.ledger):
+        ledger = _load_ledger(args.ledger)
+        ledger.record_disposition(
+            fingerprint=args.fingerprint,
+            disposition=Disposition(args.disposition),
+            rationale=args.rationale,
+            evidence=args.evidence,
+            duplicate_of=args.duplicate_of,
+        )
+        _write_ledger(args.ledger, ledger)
+    _print_json(ledger.model_dump(mode="json"))
+    return 0
+
+
+def _reproduction(args: argparse.Namespace) -> int:
+    with _ledger_lock(args.ledger):
+        ledger = _load_ledger(args.ledger)
+        ledger.record_reproduction(
+            fingerprint=args.fingerprint,
+            reproduction=args.reproduction,
+        )
+        _write_ledger(args.ledger, ledger)
+    _print_json(ledger.model_dump(mode="json"))
+    return 0
+
+
+def _verification(args: argparse.Namespace) -> int:
+    with _ledger_lock(args.ledger):
+        ledger = _load_ledger(args.ledger)
+        ledger.record_verification(
+            fingerprint=args.fingerprint,
+            passed=args.passed == "true",
+        )
+        _write_ledger(args.ledger, ledger)
     _print_json(ledger.model_dump(mode="json"))
     return 0
 
@@ -131,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
             "slots": _slots,
             "submit": _submit,
             "disposition": _disposition,
+            "reproduction": _reproduction,
+            "verification": _verification,
             "settle": _settle,
         }
         return commands[args.command](args)

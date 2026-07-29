@@ -64,6 +64,23 @@ class ReviewPolicyTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "YAML object"):
             ReviewPolicy.from_yaml("- one\n- two\n")
 
+    def test_slots_reject_round_over_generation_budget(self) -> None:
+        policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 2,
+                        "max_generation_rounds": 2,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "generation budget"):
+            policy.slots_for(stage=ReviewStage.LOCAL, round_number=3)
+
 
 if __name__ == "__main__":
     unittest.main()

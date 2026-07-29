@@ -6,7 +6,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .findings import Disposition, Finding
+from .findings import Disposition, Finding, Severity
 from .policy import ReviewStage
 
 
@@ -53,6 +53,24 @@ class ReviewLedger(BaseModel):
     results: list[ReviewResult] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def validate_nested_identities(self) -> Self:
+        """Keep persisted results and canonical findings on this ledger identity."""
+
+        for result in self.results:
+            if result.repository != self.repository:
+                raise ValueError("result repository does not match ledger")
+            if result.head_sha == self.head_sha and result.stale:
+                raise ValueError("current-head result cannot be marked stale")
+            if result.head_sha != self.head_sha and not result.stale:
+                raise ValueError("older-head result must be marked stale")
+        for finding in self.findings:
+            if finding.repository != self.repository:
+                raise ValueError("finding repository does not match ledger")
+            if finding.head_sha != self.head_sha:
+                raise ValueError("canonical finding head does not match ledger")
+        return self
+
     @property
     def current_findings(self) -> list[Finding]:
         """Canonical, deduplicated findings for the ledger's current head."""
@@ -73,10 +91,23 @@ class ReviewLedger(BaseModel):
         for submitted in result.findings:
             existing = by_fingerprint.get(submitted.fingerprint)
             if existing is None:
-                canonical = submitted.model_copy(deep=True)
+                canonical = submitted.model_copy(
+                    update={
+                        "disposition": None,
+                        "rationale": None,
+                        "verification_passed": False,
+                        "duplicate_of": None,
+                    },
+                    deep=True,
+                )
                 self.findings.append(canonical)
                 by_fingerprint[canonical.fingerprint] = canonical
                 continue
+            if (
+                submitted.severity is Severity.P1
+                and existing.severity is Severity.P2
+            ):
+                existing.severity = submitted.severity
             for execution_id in submitted.contributing_execution_ids:
                 if execution_id not in existing.contributing_execution_ids:
                     existing.contributing_execution_ids.append(execution_id)
@@ -87,14 +118,31 @@ class ReviewLedger(BaseModel):
         fingerprint: str,
         disposition: Disposition,
         rationale: str,
+        evidence: str | None = None,
+        duplicate_of: str | None = None,
     ) -> None:
         """Apply an evidence-backed disposition to a current finding."""
 
         if not rationale.strip():
             raise ValueError("disposition rationale is required")
         finding = self._finding(fingerprint)
+        if finding.severity is Severity.P1:
+            if disposition in {Disposition.REJECT, Disposition.STALE} and not (
+                evidence and evidence.strip()
+            ):
+                raise ValueError("evidence is required to dismiss a P1")
+            if disposition is Disposition.DUPLICATE and not (
+                duplicate_of and duplicate_of.strip()
+            ):
+                raise ValueError("duplicate target is required to dismiss a P1")
+        if finding.disposition is not disposition:
+            finding.verification_passed = False
         finding.disposition = disposition
         finding.rationale = rationale.strip()
+        finding.evidence = evidence.strip() if evidence and evidence.strip() else None
+        finding.duplicate_of = (
+            duplicate_of.strip() if duplicate_of and duplicate_of.strip() else None
+        )
 
     def record_reproduction(self, *, fingerprint: str, reproduction: str) -> None:
         """Attach reproduction evidence to a current finding."""

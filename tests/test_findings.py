@@ -44,6 +44,15 @@ class FindingTest(unittest.TestCase):
 
         self.assertEqual(first.fingerprint, second.fingerprint)
 
+    def test_fingerprint_preserves_path_case(self) -> None:
+        first = finding().model_copy(update={"path": "src/Foo.py", "fingerprint": ""})
+        second = finding().model_copy(update={"path": "src/foo.py", "fingerprint": ""})
+
+        reparsed_first = Finding.model_validate(first.model_dump())
+        reparsed_second = Finding.model_validate(second.model_dump())
+
+        self.assertNotEqual(reparsed_first.fingerprint, reparsed_second.fingerprint)
+
 
 if __name__ == "__main__":
     unittest.main()

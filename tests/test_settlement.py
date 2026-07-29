@@ -213,6 +213,48 @@ class SettlementTest(unittest.TestCase):
 
         self.assertTrue(report.settled)
 
+    def test_distinct_execution_policy_requires_distinct_slots(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=HEAD)
+        ledger.submit(
+            result(
+                stage=ReviewStage.LOCAL,
+                execution_id="review-one",
+            )
+        )
+        retry_same_slot = result(
+            stage=ReviewStage.LOCAL,
+            execution_id="review-two",
+        )
+        ledger.submit(retry_same_slot)
+        ledger.submit(result(stage=ReviewStage.BACKSTOP))
+
+        report = evaluate(policy=policy(reviewer_count=2), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertIn("local:2", report.missing_slots)
+
+    def test_rejected_p1_requires_evidence(self) -> None:
+        ledger = reviewed_ledger(finding(Severity.P1))
+        fingerprint = ledger.current_findings[0].fingerprint
+
+        with self.assertRaisesRegex(ValueError, "evidence"):
+            ledger.record_disposition(
+                fingerprint=fingerprint,
+                disposition=Disposition.REJECT,
+                rationale="The finding is incorrect.",
+            )
+
+    def test_duplicate_p1_requires_duplicate_target(self) -> None:
+        ledger = reviewed_ledger(finding(Severity.P1))
+        fingerprint = ledger.current_findings[0].fingerprint
+
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            ledger.record_disposition(
+                fingerprint=fingerprint,
+                disposition=Disposition.DUPLICATE,
+                rationale="Covered by another finding.",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

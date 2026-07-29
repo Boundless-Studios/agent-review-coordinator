@@ -34,6 +34,10 @@ def _normalize(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+def _normalize_path(value: str) -> str:
+    return value.removeprefix("./")
+
+
 def finding_fingerprint(
     *,
     repository: str,
@@ -47,7 +51,7 @@ def finding_fingerprint(
     normalized = {
         "repository": _normalize(repository),
         "head_sha": _normalize(head_sha),
-        "path": _normalize(path.removeprefix("./")),
+        "path": _normalize_path(path),
         "invariant": _normalize(invariant),
         "title": _normalize(title),
     }
@@ -72,6 +76,7 @@ class Finding(BaseModel):
     invariant: str = Field(min_length=1)
     evidence: str | None = None
     reproduction: str | None = None
+    duplicate_of: str | None = None
     contributing_execution_ids: list[str] = Field(default_factory=list)
     fingerprint: str = ""
     disposition: Disposition | None = None

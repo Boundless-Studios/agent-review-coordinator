@@ -69,6 +69,46 @@ class ReviewLedgerTest(unittest.TestCase):
             {"local-r1-slot1", "local-r1-slot2"},
         )
 
+    def test_duplicate_findings_preserve_highest_severity(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        p2_result = result(execution_id="local-r1-slot1")
+        p1_finding = finding(execution_id="local-r1-slot2").model_copy(
+            update={"severity": Severity.P1}
+        )
+        p1_result = ReviewResult(
+            repository=REPOSITORY,
+            head_sha=CURRENT_HEAD,
+            stage=ReviewStage.LOCAL,
+            round_number=1,
+            slot_number=2,
+            reviewer_execution_id="local-r1-slot2",
+            findings=[p1_finding],
+        )
+
+        ledger.submit(p2_result)
+        ledger.submit(p1_result)
+
+        self.assertEqual(ledger.current_findings[0].severity, Severity.P1)
+
+    def test_reviewer_submission_cannot_set_settlement_state(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        submitted = finding().model_copy(
+            update={
+                "severity": Severity.P1,
+                "disposition": Disposition.FIXED,
+                "rationale": "Reviewer says it is fixed.",
+                "verification_passed": True,
+            }
+        )
+        review_result = result().model_copy(update={"findings": [submitted]})
+
+        ledger.submit(review_result)
+
+        canonical = ledger.current_findings[0]
+        self.assertIsNone(canonical.disposition)
+        self.assertIsNone(canonical.rationale)
+        self.assertFalse(canonical.verification_passed)
+
     def test_disposition_requires_rationale(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
         ledger.submit(result())
@@ -98,6 +138,47 @@ class ReviewLedgerTest(unittest.TestCase):
             restored.current_findings[0].rationale,
             "Requires an unsupported status provider.",
         )
+
+    def test_loading_ledger_rejects_foreign_current_result(self) -> None:
+        foreign = result().model_copy(
+            update={"repository": "other/repository", "findings": []}
+        )
+
+        with self.assertRaisesRegex(ValueError, "result repository"):
+            ReviewLedger(
+                repository=REPOSITORY,
+                head_sha=CURRENT_HEAD,
+                results=[foreign],
+            )
+
+    def test_loading_ledger_requires_old_head_result_to_be_stale(self) -> None:
+        old = result(head_sha="a" * 40)
+
+        with self.assertRaisesRegex(ValueError, "older-head"):
+            ReviewLedger(
+                repository=REPOSITORY,
+                head_sha=CURRENT_HEAD,
+                results=[old],
+            )
+
+    def test_reopening_finding_invalidates_verification(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        ledger.submit(result())
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.FIXED,
+            rationale="The first fix landed.",
+        )
+        ledger.record_verification(fingerprint=fingerprint, passed=True)
+
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.FIX_NOW,
+            rationale="The finding reproduced after the first fix.",
+        )
+
+        self.assertFalse(ledger.current_findings[0].verification_passed)
 
 
 if __name__ == "__main__":

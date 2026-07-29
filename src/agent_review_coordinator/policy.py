@@ -99,6 +99,11 @@ class ReviewPolicy(BaseModel):
         """Return deterministic, provider-neutral slots for one review round."""
 
         stage_policy = getattr(self.review, stage.value)
+        if round_number > stage_policy.max_generation_rounds:
+            raise ValueError(
+                f"{stage.value} round {round_number} exceeds generation budget "
+                f"{stage_policy.max_generation_rounds}"
+            )
         return [
             ReviewerSlot(
                 stage=stage,

@@ -1,11 +1,14 @@
 import contextlib
 import io
 import json
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from agent_review_coordinator.cli import main
+from agent_review_coordinator.cli import _ledger_lock, main
 from agent_review_coordinator.findings import Finding, Severity
 from agent_review_coordinator.ledger import ReviewLedger, ReviewResult
 from agent_review_coordinator.policy import ReviewStage
@@ -189,6 +192,107 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(code, 2)
         self.assertIn("error:", stderr)
+
+    def test_reproduction_and_verification_commands_update_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "ledger.json"
+            item = Finding(
+                repository=REPOSITORY,
+                head_sha=HEAD,
+                reviewer_execution_id="local-r1-slot1",
+                severity=Severity.P2,
+                title="Do not synthesize green",
+                explanation="A missing check is treated as passing.",
+                path="scripts/review.py",
+                invariant="CI must be terminal",
+            )
+            ledger_path.write_text(
+                ReviewLedger(
+                    repository=REPOSITORY,
+                    head_sha=HEAD,
+                    findings=[item],
+                ).model_dump_json(),
+                encoding="utf-8",
+            )
+
+            proof_code, _, _ = run_cli(
+                [
+                    "reproduction",
+                    "--ledger",
+                    str(ledger_path),
+                    "--fingerprint",
+                    item.fingerprint,
+                    "--reproduction",
+                    "Missing required check returns clean.",
+                ]
+            )
+            verify_code, _, _ = run_cli(
+                [
+                    "verification",
+                    "--ledger",
+                    str(ledger_path),
+                    "--fingerprint",
+                    item.fingerprint,
+                    "--passed",
+                    "true",
+                ]
+            )
+            stored = ReviewLedger.model_validate_json(
+                ledger_path.read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(proof_code, 0)
+        self.assertEqual(verify_code, 0)
+        self.assertEqual(
+            stored.findings[0].reproduction,
+            "Missing required check returns clean.",
+        )
+        self.assertTrue(stored.findings[0].verification_passed)
+
+    def test_submit_waits_for_interprocess_ledger_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger_path = root / "ledger.json"
+            result_path = root / "result.json"
+            result_path.write_text(
+                ReviewResult(
+                    repository=REPOSITORY,
+                    head_sha=HEAD,
+                    stage=ReviewStage.LOCAL,
+                    round_number=1,
+                    slot_number=1,
+                    reviewer_execution_id="local-r1-slot1",
+                ).model_dump_json(),
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable,
+                "-m",
+                "agent_review_coordinator.cli",
+                "submit",
+                "--ledger",
+                str(ledger_path),
+                "--repository",
+                REPOSITORY,
+                "--head-sha",
+                HEAD,
+                "--result",
+                str(result_path),
+            ]
+
+            with _ledger_lock(ledger_path):
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                time.sleep(0.2)
+                self.assertIsNone(process.poll())
+
+            _, stderr = process.communicate(timeout=5)
+
+        self.assertEqual(process.returncode, 0, stderr)
 
 
 if __name__ == "__main__":

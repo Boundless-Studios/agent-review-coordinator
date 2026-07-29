@@ -33,21 +33,31 @@ def _missing_for_stage(
         for result in ledger.results
         if not result.stale and result.stage is stage
     ]
-    if stage_policy.distinct_executions:
-        qualifying_results = {
-            result.reviewer_execution_id: result for result in results
-        }
-    else:
-        qualifying_results = {result.slot_number: result for result in results}
+    results_by_slot = {
+        result.slot_number: result
+        for result in results
+        if result.slot_number <= stage_policy.reviewer_count
+    }
     required = stage_policy.required_results or stage_policy.reviewer_count
+    qualifying_count = len(results_by_slot)
+    if stage_policy.distinct_executions:
+        qualifying_count = min(
+            qualifying_count,
+            len(
+                {
+                    result.reviewer_execution_id
+                    for result in results_by_slot.values()
+                }
+            ),
+        )
     missing = [
         f"{stage.value}:{slot_number}"
-        for slot_number in range(len(qualifying_results) + 1, required + 1)
+        for slot_number in range(qualifying_count + 1, required + 1)
     ]
     if stage_policy.distinct_providers:
         providers = {
             result.reviewer_provider
-            for result in qualifying_results.values()
+            for result in results_by_slot.values()
             if result.reviewer_provider
         }
         if len(providers) < required:
@@ -60,11 +70,9 @@ def _finding_action(finding: Finding) -> str | None:
     if finding.severity is Severity.P1:
         if disposition is Disposition.FIXED:
             return None if finding.verification_passed else "verify_fix"
-        if disposition in {
-            Disposition.REJECT,
-            Disposition.DUPLICATE,
-            Disposition.STALE,
-        }:
+        if disposition in {Disposition.REJECT, Disposition.STALE} and finding.evidence:
+            return None
+        if disposition is Disposition.DUPLICATE and finding.duplicate_of:
             return None
         return "address_p1"
 

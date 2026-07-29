@@ -66,10 +66,22 @@ agent-review-coordinator disposition \
   --disposition defer \
   --rationale "Unsupported configuration with no observed occurrence."
 
+agent-review-coordinator reproduction \
+  --ledger review-ledger.json \
+  --fingerprint "$FINGERPRINT" \
+  --reproduction "Missing required check returns a clean result."
+
+agent-review-coordinator verification \
+  --ledger review-ledger.json \
+  --fingerprint "$FINGERPRINT" \
+  --passed true
+
 agent-review-coordinator settle \
   --policy review-policy.yaml \
   --ledger review-ledger.json
 ```
 
 `settle` exits `0` when settled, `10` when review work or evaluation remains, and
-`2` for invalid input.
+`2` for invalid input. Ledger mutations use a repository-local advisory lock and
+atomic replacement so independent reviewer processes cannot overwrite one
+another.
