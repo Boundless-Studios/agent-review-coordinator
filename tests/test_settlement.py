@@ -9,15 +9,22 @@ REPOSITORY = "Boundless-Studios/gaia-free"
 HEAD = "c" * 40
 
 
-def policy(*, max_rounds: int = 2, distinct_providers: bool = False) -> ReviewPolicy:
+def policy(
+    *,
+    max_rounds: int = 2,
+    distinct_executions: bool = True,
+    distinct_providers: bool = False,
+    reviewer_count: int = 1,
+) -> ReviewPolicy:
     return ReviewPolicy.model_validate(
         {
             "version": 1,
             "review": {
                 "local": {
-                    "reviewer_count": 1,
-                    "required_results": 1,
+                    "reviewer_count": reviewer_count,
+                    "required_results": reviewer_count,
                     "max_generation_rounds": max_rounds,
+                    "distinct_executions": distinct_executions,
                     "distinct_providers": distinct_providers,
                 },
                 "backstop": {
@@ -183,6 +190,28 @@ class SettlementTest(unittest.TestCase):
 
         self.assertFalse(report.settled)
         self.assertIn("local:provider-diversity", report.missing_slots)
+
+    def test_non_distinct_execution_policy_counts_filled_slots(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=HEAD)
+        ledger.submit(
+            result(
+                stage=ReviewStage.LOCAL,
+                execution_id="shared-review",
+            )
+        )
+        second = result(
+            stage=ReviewStage.LOCAL,
+            execution_id="shared-review",
+        ).model_copy(update={"slot_number": 2})
+        ledger.submit(second)
+        ledger.submit(result(stage=ReviewStage.BACKSTOP))
+
+        report = evaluate(
+            policy=policy(distinct_executions=False, reviewer_count=2),
+            ledger=ledger,
+        )
+
+        self.assertTrue(report.settled)
 
 
 if __name__ == "__main__":

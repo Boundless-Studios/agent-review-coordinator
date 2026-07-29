@@ -33,18 +33,21 @@ def _missing_for_stage(
         for result in ledger.results
         if not result.stale and result.stage is stage
     ]
-    distinct_executions = {
-        result.reviewer_execution_id: result for result in results
-    }
+    if stage_policy.distinct_executions:
+        qualifying_results = {
+            result.reviewer_execution_id: result for result in results
+        }
+    else:
+        qualifying_results = {result.slot_number: result for result in results}
     required = stage_policy.required_results or stage_policy.reviewer_count
     missing = [
         f"{stage.value}:{slot_number}"
-        for slot_number in range(len(distinct_executions) + 1, required + 1)
+        for slot_number in range(len(qualifying_results) + 1, required + 1)
     ]
     if stage_policy.distinct_providers:
         providers = {
             result.reviewer_provider
-            for result in distinct_executions.values()
+            for result in qualifying_results.values()
             if result.reviewer_provider
         }
         if len(providers) < required:
