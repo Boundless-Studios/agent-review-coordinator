@@ -72,6 +72,7 @@ class Finding(BaseModel):
     invariant: str = Field(min_length=1)
     evidence: str | None = None
     reproduction: str | None = None
+    contributing_execution_ids: list[str] = Field(default_factory=list)
     fingerprint: str = ""
     disposition: Disposition | None = None
     rationale: str | None = None
@@ -91,4 +92,8 @@ class Finding(BaseModel):
         if self.fingerprint and self.fingerprint != calculated:
             raise ValueError("finding fingerprint does not match normalized content")
         self.fingerprint = calculated
+        if not self.contributing_execution_ids:
+            self.contributing_execution_ids = [self.reviewer_execution_id]
+        elif self.reviewer_execution_id not in self.contributing_execution_ids:
+            self.contributing_execution_ids.append(self.reviewer_execution_id)
         return self
