@@ -2,7 +2,7 @@
 
 from .findings import Disposition, Finding, Severity, finding_fingerprint
 from .ledger import ReviewLedger, ReviewResult
-from .policy import ReviewPolicy, ReviewerSlot, ReviewStage, ReviewStagePolicy
+from .policy import ReviewerSlot, ReviewPolicy, ReviewStage, ReviewStagePolicy
 from .settlement import SettlementReport, evaluate
 
 __version__ = "0.1.0"
@@ -16,9 +16,9 @@ __all__ = [
     "ReviewStage",
     "ReviewStagePolicy",
     "ReviewerSlot",
-    "Severity",
     "SettlementReport",
+    "Severity",
     "__version__",
-    "finding_fingerprint",
     "evaluate",
+    "finding_fingerprint",
 ]

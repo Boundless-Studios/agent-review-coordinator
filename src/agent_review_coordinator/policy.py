@@ -87,7 +87,7 @@ class ReviewPolicy(BaseModel):
 
         data = yaml.safe_load(text)
         if not isinstance(data, dict):
-            raise ValueError("review policy must be a YAML object")
+            raise TypeError("review policy must be a YAML object")
         return cls.model_validate(data)
 
     def slots_for(

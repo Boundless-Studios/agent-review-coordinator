@@ -5,7 +5,6 @@ from agent_review_coordinator.ledger import ReviewLedger, ReviewResult
 from agent_review_coordinator.policy import ReviewPolicy, ReviewStage
 from agent_review_coordinator.settlement import evaluate
 
-
 REPOSITORY = "Boundless-Studios/gaia-free"
 HEAD = "c" * 40
 

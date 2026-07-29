@@ -4,7 +4,6 @@ from agent_review_coordinator.findings import Disposition, Finding, Severity
 from agent_review_coordinator.ledger import ReviewLedger, ReviewResult
 from agent_review_coordinator.policy import ReviewStage
 
-
 REPOSITORY = "Boundless-Studios/gaia-free"
 CURRENT_HEAD = "b" * 40
 

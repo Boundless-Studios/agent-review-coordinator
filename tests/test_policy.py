@@ -60,6 +60,10 @@ class ReviewPolicyTest(unittest.TestCase):
         self.assertEqual(policy.review.local.required_results, 2)
         self.assertFalse(policy.settlement.automatic_tracker_writes)
 
+    def test_policy_rejects_non_object_yaml(self) -> None:
+        with self.assertRaisesRegex(TypeError, "YAML object"):
+            ReviewPolicy.from_yaml("- one\n- two\n")
+
 
 if __name__ == "__main__":
     unittest.main()
