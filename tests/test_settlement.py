@@ -2,6 +2,8 @@ import unittest
 
 from agent_review_coordinator.findings import (
     Disposition,
+    EvidenceArtifact,
+    EvidenceKind,
     Finding,
     FixCost,
     Impact,
@@ -144,6 +146,16 @@ class SettlementTest(unittest.TestCase):
 
         self.assertTrue(report.settled)
 
+    def test_p3_with_malformed_disposition_metadata_remains_nonblocking(self) -> None:
+        ledger = reviewed_ledger(finding(Severity.P3))
+        canonical = ledger.current_findings[0]
+        canonical.disposition = Disposition.DECLINED
+        canonical.rationale = None
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertTrue(report.settled)
+
     def test_p2_fix_signals_reject_a_decline(self) -> None:
         evidence_cases = [
             p2_evidence(reachability=Reachability.SUPPORTED),
@@ -201,6 +213,36 @@ class SettlementTest(unittest.TestCase):
             report.finding_states[fingerprint],
             FindingSettlementState.DECLINED_WITH_RATIONALE,
         )
+
+    def test_keyed_reproduction_requires_a_fix(self) -> None:
+        item = finding().model_copy(
+            update={
+                "p2_evidence": p2_evidence(
+                    reachability=Reachability.UNREACHABLE,
+                    impact=Impact.LOW,
+                    fix_cost=FixCost.ARCHITECTURAL,
+                ),
+                "evidence_artifacts": [
+                    EvidenceArtifact(
+                        key="supported-production-reproduction",
+                        kind=EvidenceKind.REPRODUCTION,
+                        summary="Reproduced through the supported production path.",
+                    )
+                ],
+            }
+        )
+        ledger = reviewed_ledger(item)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DECLINED,
+            rationale="Structured evidence predates the reproduction.",
+        )
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertIn("fix_p2", report.required_actions)
 
     def test_unknown_p2_evidence_cannot_be_declined(self) -> None:
         item = finding().model_copy(update={"p2_evidence": p2_evidence()})
@@ -602,6 +644,89 @@ class SettlementTest(unittest.TestCase):
 
         self.assertFalse(report.settled)
         self.assertIn("local:1", report.missing_slots)
+
+    def test_provider_diversity_ignores_optional_and_out_of_policy_slots(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=HEAD)
+        ledger.submit(
+            result(
+                stage=ReviewStage.LOCAL,
+                execution_id="required-one",
+                provider="provider-a",
+            )
+        )
+        ledger.submit(
+            result(
+                stage=ReviewStage.LOCAL,
+                execution_id="required-two",
+                provider="provider-a",
+            ).model_copy(update={"slot_number": 2})
+        )
+        ledger.submit(
+            result(
+                stage=ReviewStage.LOCAL,
+                execution_id="optional-three",
+                provider="provider-b",
+            ).model_copy(update={"slot_number": 3})
+        )
+        ledger.submit(
+            result(
+                stage=ReviewStage.LOCAL,
+                execution_id="undeclared-four",
+                provider="provider-c",
+            ).model_copy(update={"slot_number": 4})
+        )
+        ledger.submit(result(stage=ReviewStage.BACKSTOP))
+        custom_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 3,
+                        "required_results": 2,
+                        "distinct_providers": True,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        )
+
+        report = evaluate(
+            policy=custom_policy,
+            ledger=ledger,
+        )
+
+        self.assertFalse(report.settled)
+        self.assertIn("local:provider-diversity", report.missing_slots)
+
+    def test_persisted_p0_p1_dismissal_requires_nonblank_evidence(self) -> None:
+        for severity in (Severity.P0, Severity.P1):
+            for disposition in (Disposition.REJECT, Disposition.STALE):
+                with self.subTest(severity=severity, disposition=disposition):
+                    ledger = reviewed_ledger(finding(severity))
+                    canonical = ledger.current_findings[0]
+                    canonical.disposition = disposition
+                    canonical.rationale = "Persisted dismissal."
+                    canonical.evidence = "   "
+
+                    report = evaluate(policy=policy(), ledger=ledger)
+
+                    self.assertFalse(report.settled)
+                    self.assertIn(
+                        f"address_{severity.value}",
+                        report.required_actions,
+                    )
+
+    def test_persisted_duplicate_requires_nonblank_target(self) -> None:
+        ledger = reviewed_ledger(finding())
+        canonical = ledger.current_findings[0]
+        canonical.disposition = Disposition.DUPLICATE
+        canonical.rationale = "Covered by another finding."
+        canonical.duplicate_of = "   "
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertIn("evaluate_p2", report.required_actions)
 
     def test_persisted_decline_without_rationale_is_unresolved(self) -> None:
         item = finding().model_copy(

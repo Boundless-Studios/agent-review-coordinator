@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .findings import (
     Disposition,
+    EvidenceKind,
     Finding,
     FixCost,
     Impact,
@@ -53,7 +54,11 @@ def _missing_for_stage(
         if not result.stale and result.stage is stage
     ]
     required = stage_policy.required_results or stage_policy.reviewer_count
-    results_by_slot = {result.slot_number: result for result in results}
+    results_by_slot = {
+        result.slot_number: result
+        for result in results
+        if 1 <= result.slot_number <= stage_policy.reviewer_count
+    }
     missing: list[str] = []
     seen_executions: set[str] = set()
     for slot_number in range(1, required + 1):
@@ -70,9 +75,10 @@ def _missing_for_stage(
         seen_executions.add(result.reviewer_execution_id)
     if stage_policy.distinct_providers:
         providers = {
-            result.reviewer_provider
-            for result in results_by_slot.values()
-            if result.reviewer_provider
+            results_by_slot[slot_number].reviewer_provider
+            for slot_number in range(1, required + 1)
+            if slot_number in results_by_slot
+            and results_by_slot[slot_number].reviewer_provider
         }
         if len(providers) < required:
             missing.append(f"{stage.value}:provider-diversity")
@@ -81,6 +87,8 @@ def _missing_for_stage(
 
 def _finding_action(finding: Finding) -> str | None:
     disposition = finding.disposition
+    if finding.severity is Severity.P3:
+        return None
     if disposition is not None and not (
         finding.rationale and finding.rationale.strip()
     ):
@@ -92,14 +100,19 @@ def _finding_action(finding: Finding) -> str | None:
     if finding.severity in {Severity.P0, Severity.P1}:
         if disposition is Disposition.FIXED:
             return None if finding.verification_passed else "verify_fix"
-        if disposition in {Disposition.REJECT, Disposition.STALE} and finding.evidence:
+        if (
+            disposition in {Disposition.REJECT, Disposition.STALE}
+            and finding.evidence
+            and finding.evidence.strip()
+        ):
             return None
-        if disposition is Disposition.DUPLICATE and finding.duplicate_of:
+        if (
+            disposition is Disposition.DUPLICATE
+            and finding.duplicate_of
+            and finding.duplicate_of.strip()
+        ):
             return None
         return f"address_{finding.severity.value}"
-
-    if finding.severity is Severity.P3:
-        return None
 
     if disposition is None:
         return "fix_reproduced_p2" if finding.reproduction else "evaluate_p2"
@@ -123,6 +136,12 @@ def _finding_action(finding: Finding) -> str | None:
             if finding.p2_evidence is not None
             and finding.deferred_to_issue
             and finding.deferred_to_issue.strip()
+            else "evaluate_p2"
+        )
+    if disposition is Disposition.DUPLICATE:
+        return (
+            None
+            if finding.duplicate_of and finding.duplicate_of.strip()
             else "evaluate_p2"
         )
     if disposition in {
@@ -154,6 +173,10 @@ def _p2_requires_fix(finding: Finding) -> bool:
             evidence.durable_state_risk,
             evidence.fix_cost is FixCost.CHEAP,
             bool(finding.reproduction),
+            any(
+                artifact.kind is EvidenceKind.REPRODUCTION
+                for artifact in finding.evidence_artifacts
+            ),
         )
     )
 
