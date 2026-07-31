@@ -171,6 +171,10 @@ class SettlementTest(unittest.TestCase):
 
                 self.assertFalse(report.settled)
                 self.assertIn("fix_p2", report.required_actions)
+                self.assertEqual(
+                    report.finding_states[fingerprint],
+                    FindingSettlementState.UNRESOLVED,
+                )
 
     def test_unreachable_architectural_p2_can_be_declined(self) -> None:
         item = finding().model_copy(
@@ -222,6 +226,24 @@ class SettlementTest(unittest.TestCase):
         self.assertEqual(
             report.finding_states[fingerprint],
             FindingSettlementState.DEFERRED_TO_EXISTING_ISSUE,
+        )
+
+    def test_deferral_without_p2_evidence_remains_unresolved(self) -> None:
+        ledger = reviewed_ledger(finding())
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DEFERRED_TO_EXISTING_ISSUE,
+            rationale="The redesign is tracked elsewhere.",
+            deferred_to_issue="BOU-1234",
+        )
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertEqual(
+            report.finding_states[fingerprint],
+            FindingSettlementState.UNRESOLVED,
         )
 
     def test_late_exact_head_feedback_reopens_settlement(self) -> None:

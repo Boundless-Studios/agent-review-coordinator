@@ -129,6 +129,8 @@ def _p2_requires_fix(finding: Finding) -> bool:
 
 
 def _finding_state(finding: Finding) -> FindingSettlementState:
+    if _finding_action(finding) is not None:
+        return FindingSettlementState.UNRESOLVED
     if finding.disposition is Disposition.FIXED and finding.verification_passed:
         return FindingSettlementState.FIXED
     if finding.disposition is Disposition.DEFERRED_TO_EXISTING_ISSUE:
