@@ -65,9 +65,12 @@ Retrying the same provider and slot without new evidence is idempotent even when
 the adapter assigns a new execution ID or review round. It neither consumes
 another stored run nor creates another finding. Evidence merges monotonically:
 severity and structured risk signals may strengthen, while text rephrasing and
-weaker evidence cannot overwrite the canonical record or reset convergence.
-Legacy disposition values remain readable but follow the same P2-evidence
-policy. Review-generation limits never waive a known blocking finding, and no
+weaker evidence cannot overwrite the canonical record or reset convergence. Use
+`evidence_artifacts` with a stable `key`, `kind`, and `summary` when a later run
+has genuinely new evidence: a new key is retained and reopens the finding,
+while rephrasing the summary for an existing key is idempotent. Legacy
+disposition values remain readable but follow the same P2-evidence policy.
+Review-generation limits never waive a known blocking finding, and no
 disposition creates tracker work.
 
 The CLI exposes the same JSON contract:

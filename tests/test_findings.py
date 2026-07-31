@@ -2,6 +2,8 @@ import unittest
 
 from agent_review_coordinator.findings import (
     Disposition,
+    EvidenceArtifact,
+    EvidenceKind,
     Finding,
     FixCost,
     Impact,
@@ -31,6 +33,26 @@ def finding(
 
 
 class FindingTest(unittest.TestCase):
+    def test_keyed_evidence_artifact_round_trips(self) -> None:
+        artifact = EvidenceArtifact(
+            key="production-path-b",
+            kind=EvidenceKind.REPRODUCTION,
+            summary="Observed on the supported production path.",
+        )
+        item = finding().model_copy(update={"evidence_artifacts": [artifact]})
+
+        restored = Finding.model_validate_json(item.model_dump_json())
+
+        self.assertEqual(
+            restored.evidence_artifacts[0].model_dump(mode="json"),
+            {
+                "schema_version": 1,
+                "key": "production-path-b",
+                "kind": "reproduction",
+                "summary": "Observed on the supported production path.",
+            },
+        )
+
     def test_protocol_accepts_nonblocking_and_critical_severities(self) -> None:
         self.assertEqual(
             {

@@ -59,6 +59,24 @@ class FixCost(StrEnum):
     UNKNOWN = "unknown"
 
 
+class EvidenceKind(StrEnum):
+    """How a keyed evidence artifact supports a finding."""
+
+    OBSERVATION = "observation"
+    REPRODUCTION = "reproduction"
+
+
+class EvidenceArtifact(BaseModel):
+    """Stable evidence identity whose summary may be rephrased."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    key: str = Field(min_length=1)
+    kind: EvidenceKind
+    summary: str = Field(min_length=1)
+
+
 class P2Evidence(BaseModel):
     """Decision inputs required for an evidence-based P2 disposition."""
 
@@ -120,6 +138,7 @@ class Finding(BaseModel):
     line: int | None = Field(default=None, ge=1)
     invariant: str = Field(min_length=1)
     evidence: str | None = None
+    evidence_artifacts: list[EvidenceArtifact] = Field(default_factory=list)
     p2_evidence: P2Evidence | None = None
     reproduction: str | None = None
     duplicate_of: str | None = None

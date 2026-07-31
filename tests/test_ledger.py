@@ -2,6 +2,8 @@ import unittest
 
 from agent_review_coordinator.findings import (
     Disposition,
+    EvidenceArtifact,
+    EvidenceKind,
     Finding,
     FixCost,
     Impact,
@@ -50,6 +52,84 @@ def result(
 
 
 class ReviewLedgerTest(unittest.TestCase):
+    def test_new_keyed_evidence_is_retained_and_reopens_finding(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        first_artifact = EvidenceArtifact(
+            key="path-a",
+            kind=EvidenceKind.OBSERVATION,
+            summary="Stack trace from path A.",
+        )
+        original_finding = finding().model_copy(
+            update={"evidence_artifacts": [first_artifact]}
+        )
+        original = result().model_copy(update={"findings": [original_finding]})
+        ledger.submit(original)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DECLINED,
+            rationale="Only unsupported path A was known.",
+        )
+        second_artifact = EvidenceArtifact(
+            key="supported-production-path-b",
+            kind=EvidenceKind.REPRODUCTION,
+            summary="Production reproduction from supported path B.",
+        )
+        retry_finding = original_finding.model_copy(
+            update={
+                "evidence_artifacts": [first_artifact, second_artifact],
+            }
+        )
+        retry = result(execution_id="local-retry").model_copy(
+            update={"round_number": 2, "findings": [retry_finding]}
+        )
+
+        ledger.submit(retry)
+
+        canonical = ledger.current_findings[0]
+        self.assertEqual(len(ledger.results), 2)
+        self.assertEqual(
+            [artifact.key for artifact in canonical.evidence_artifacts],
+            ["path-a", "supported-production-path-b"],
+        )
+        self.assertIsNone(canonical.disposition)
+
+    def test_same_evidence_key_with_rephrased_summary_is_idempotent(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        original_artifact = EvidenceArtifact(
+            key="path-a",
+            kind=EvidenceKind.OBSERVATION,
+            summary="Stack trace from path A.",
+        )
+        original_finding = finding().model_copy(
+            update={"evidence_artifacts": [original_artifact]}
+        )
+        original = result().model_copy(update={"findings": [original_finding]})
+        ledger.submit(original)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DECLINED,
+            rationale="Recorded for artifact idempotency coverage.",
+        )
+        rephrased_artifact = original_artifact.model_copy(
+            update={"summary": "Path A produced the same stack trace."}
+        )
+        retry_finding = original_finding.model_copy(
+            update={"evidence_artifacts": [rephrased_artifact]}
+        )
+        retry = result(execution_id="local-retry").model_copy(
+            update={"round_number": 2, "findings": [retry_finding]}
+        )
+
+        ledger.submit(retry)
+
+        self.assertEqual(len(ledger.results), 1)
+        self.assertEqual(
+            ledger.current_findings[0].disposition,
+            Disposition.DECLINED,
+        )
+
     def test_rephrased_text_evidence_does_not_reopen_or_consume_a_run(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
         original_finding = finding().model_copy(

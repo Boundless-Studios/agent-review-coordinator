@@ -2,6 +2,8 @@
 
 from .findings import (
     Disposition,
+    EvidenceArtifact,
+    EvidenceKind,
     Finding,
     FixCost,
     Impact,
@@ -24,6 +26,8 @@ __version__ = "0.2.0"
 
 __all__ = [
     "Disposition",
+    "EvidenceArtifact",
+    "EvidenceKind",
     "Finding",
     "FindingSettlementState",
     "FixCost",

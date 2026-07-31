@@ -115,6 +115,14 @@ def _is_retry_without_new_evidence(
             return False
         if existing.reproduction is None and submitted.reproduction:
             return False
+        existing_artifact_keys = {
+            artifact.key for artifact in existing.evidence_artifacts
+        }
+        if any(
+            artifact.key not in existing_artifact_keys
+            for artifact in submitted.evidence_artifacts
+        ):
+            return False
         if (
             _merge_p2_evidence(existing.p2_evidence, submitted.p2_evidence)
             != existing.p2_evidence
@@ -244,6 +252,14 @@ class ReviewLedger(BaseModel):
             if existing.reproduction is None and submitted.reproduction:
                 existing.reproduction = " ".join(submitted.reproduction.split())
                 materially_changed = True
+            existing_artifact_keys = {
+                artifact.key for artifact in existing.evidence_artifacts
+            }
+            for artifact in submitted.evidence_artifacts:
+                if artifact.key not in existing_artifact_keys:
+                    existing.evidence_artifacts.append(artifact)
+                    existing_artifact_keys.add(artifact.key)
+                    materially_changed = True
             if materially_changed:
                 existing.disposition = None
                 existing.rationale = None
