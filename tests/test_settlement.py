@@ -1,9 +1,17 @@
 import unittest
 
-from agent_review_coordinator.findings import Disposition, Finding, Severity
+from agent_review_coordinator.findings import (
+    Disposition,
+    Finding,
+    FixCost,
+    Impact,
+    P2Evidence,
+    Reachability,
+    Severity,
+)
 from agent_review_coordinator.ledger import ReviewLedger, ReviewResult
 from agent_review_coordinator.policy import ReviewPolicy, ReviewStage
-from agent_review_coordinator.settlement import evaluate
+from agent_review_coordinator.settlement import FindingSettlementState, evaluate
 
 REPOSITORY = "Boundless-Studios/gaia-free"
 HEAD = "c" * 40
@@ -47,6 +55,29 @@ def finding(severity: Severity = Severity.P2) -> Finding:
         explanation="A missing check is treated as passing.",
         path="scripts/review.py",
         invariant="CI must be terminal",
+    )
+
+
+def p2_evidence(
+    *,
+    reachability: Reachability = Reachability.UNKNOWN,
+    impact: Impact = Impact.UNKNOWN,
+    observed_recurrence: int = 0,
+    interface_boundary_risk: bool = False,
+    security_risk: bool = False,
+    data_loss_risk: bool = False,
+    durable_state_risk: bool = False,
+    fix_cost: FixCost = FixCost.UNKNOWN,
+) -> P2Evidence:
+    return P2Evidence(
+        reachability=reachability,
+        impact=impact,
+        observed_recurrence=observed_recurrence,
+        interface_boundary_risk=interface_boundary_risk,
+        security_risk=security_risk,
+        data_loss_risk=data_loss_risk,
+        durable_state_risk=durable_state_risk,
+        fix_cost=fix_cost,
     )
 
 
@@ -96,6 +127,133 @@ def reviewed_ledger(item: Finding, *, round_number: int = 1) -> ReviewLedger:
 
 
 class SettlementTest(unittest.TestCase):
+    def test_p0_blocks_like_p1(self) -> None:
+        report = evaluate(
+            policy=policy(),
+            ledger=reviewed_ledger(finding(Severity.P0)),
+        )
+
+        self.assertFalse(report.settled)
+        self.assertIn("address_p0", report.required_actions)
+
+    def test_p3_never_blocks_settlement(self) -> None:
+        report = evaluate(
+            policy=policy(),
+            ledger=reviewed_ledger(finding(Severity.P3)),
+        )
+
+        self.assertTrue(report.settled)
+
+    def test_p2_fix_signals_reject_a_decline(self) -> None:
+        evidence_cases = [
+            p2_evidence(reachability=Reachability.SUPPORTED),
+            p2_evidence(impact=Impact.MEANINGFUL),
+            p2_evidence(observed_recurrence=1),
+            p2_evidence(interface_boundary_risk=True),
+            p2_evidence(security_risk=True),
+            p2_evidence(data_loss_risk=True),
+            p2_evidence(durable_state_risk=True),
+            p2_evidence(fix_cost=FixCost.CHEAP),
+        ]
+
+        for evidence in evidence_cases:
+            with self.subTest(evidence=evidence):
+                item = finding().model_copy(update={"p2_evidence": evidence})
+                ledger = reviewed_ledger(item)
+                fingerprint = ledger.current_findings[0].fingerprint
+                ledger.record_disposition(
+                    fingerprint=fingerprint,
+                    disposition=Disposition.DECLINED,
+                    rationale="The change is not worthwhile.",
+                )
+
+                report = evaluate(policy=policy(), ledger=ledger)
+
+                self.assertFalse(report.settled)
+                self.assertIn("fix_p2", report.required_actions)
+
+    def test_unreachable_architectural_p2_can_be_declined(self) -> None:
+        item = finding().model_copy(
+            update={
+                "p2_evidence": p2_evidence(
+                    reachability=Reachability.UNREACHABLE,
+                    impact=Impact.LOW,
+                    fix_cost=FixCost.ARCHITECTURAL,
+                )
+            }
+        )
+        ledger = reviewed_ledger(item)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DECLINED,
+            rationale="Unsupported path and disproportionate architecture.",
+        )
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertTrue(report.settled)
+        self.assertEqual(
+            report.finding_states[fingerprint],
+            FindingSettlementState.DECLINED_WITH_RATIONALE,
+        )
+
+    def test_p2_can_defer_to_an_existing_issue(self) -> None:
+        item = finding().model_copy(
+            update={
+                "p2_evidence": p2_evidence(
+                    reachability=Reachability.SUPPORTED,
+                    durable_state_risk=True,
+                )
+            }
+        )
+        ledger = reviewed_ledger(item)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DEFERRED_TO_EXISTING_ISSUE,
+            rationale="The owning durable-state redesign is already tracked.",
+            deferred_to_issue="BOU-1234",
+        )
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertTrue(report.settled)
+        self.assertEqual(
+            report.finding_states[fingerprint],
+            FindingSettlementState.DEFERRED_TO_EXISTING_ISSUE,
+        )
+
+    def test_late_exact_head_feedback_reopens_settlement(self) -> None:
+        ledger = reviewed_ledger(finding(Severity.P3))
+        self.assertTrue(evaluate(policy=policy(), ledger=ledger).settled)
+        late = finding().model_copy(
+            update={
+                "title": "Late exact-head security finding",
+                "invariant": "Untrusted input must remain bounded",
+                "p2_evidence": p2_evidence(security_risk=True),
+                "fingerprint": "",
+            }
+        )
+        late_result = result(
+            stage=ReviewStage.LOCAL,
+            findings=[Finding.model_validate(late.model_dump())],
+            execution_id="late-exact-head-review",
+        ).model_copy(update={"slot_number": 2})
+
+        ledger.submit(late_result)
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertIn(
+            late_result.findings[0].fingerprint,
+            report.blocking_fingerprints,
+        )
+        self.assertEqual(
+            report.finding_states[late_result.findings[0].fingerprint],
+            FindingSettlementState.UNRESOLVED,
+        )
+
     def test_p1_blocks_after_generation_budget_is_exhausted(self) -> None:
         report = evaluate(
             policy=policy(max_rounds=2),
@@ -150,7 +308,12 @@ class SettlementTest(unittest.TestCase):
         )
 
         ledger.record_verification(fingerprint=fingerprint, passed=True)
-        self.assertTrue(evaluate(policy=policy(), ledger=ledger).settled)
+        report = evaluate(policy=policy(), ledger=ledger)
+        self.assertTrue(report.settled)
+        self.assertEqual(
+            report.finding_states[fingerprint],
+            FindingSettlementState.FIXED,
+        )
 
     def test_prove_first_promotes_after_reproduction(self) -> None:
         ledger = reviewed_ledger(finding())

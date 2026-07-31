@@ -117,6 +117,26 @@ class ReviewLedgerTest(unittest.TestCase):
 
         self.assertEqual(ledger.current_findings[0].severity, Severity.P1)
 
+    def test_duplicate_findings_can_promote_to_p0(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        ledger.submit(result(execution_id="local-r1-slot1"))
+        p0_finding = finding(execution_id="local-r1-slot2").model_copy(
+            update={"severity": Severity.P0}
+        )
+        p0_result = ReviewResult(
+            repository=REPOSITORY,
+            head_sha=CURRENT_HEAD,
+            stage=ReviewStage.LOCAL,
+            round_number=1,
+            slot_number=2,
+            reviewer_execution_id="local-r1-slot2",
+            findings=[p0_finding],
+        )
+
+        ledger.submit(p0_result)
+
+        self.assertEqual(ledger.current_findings[0].severity, Severity.P0)
+
     def test_materially_new_evidence_reopens_a_settled_finding(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
         original = result()
@@ -265,6 +285,25 @@ class ReviewLedgerTest(unittest.TestCase):
         )
 
         self.assertFalse(ledger.current_findings[0].verification_passed)
+
+    def test_declining_incorrect_p0_requires_evidence(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        critical = result().model_copy(
+            update={
+                "findings": [
+                    finding().model_copy(update={"severity": Severity.P0})
+                ]
+            }
+        )
+        ledger.submit(critical)
+        fingerprint = ledger.current_findings[0].fingerprint
+
+        with self.assertRaisesRegex(ValueError, "evidence"):
+            ledger.record_disposition(
+                fingerprint=fingerprint,
+                disposition=Disposition.REJECT,
+                rationale="The report is factually incorrect.",
+            )
 
 
 if __name__ == "__main__":

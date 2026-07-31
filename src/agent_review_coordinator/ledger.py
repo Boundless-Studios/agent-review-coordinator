@@ -9,6 +9,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .findings import Disposition, Finding, Severity
 from .policy import ReviewStage
 
+_SEVERITY_RANK = {
+    Severity.P3: 0,
+    Severity.P2: 1,
+    Severity.P1: 2,
+    Severity.P0: 3,
+}
+
 
 class ReviewResult(BaseModel):
     """One reviewer execution result for an immutable snapshot."""
@@ -111,12 +118,10 @@ class ReviewLedger(BaseModel):
                 self.findings.append(canonical)
                 by_fingerprint[canonical.fingerprint] = canonical
                 continue
-            if (
-                submitted.severity is Severity.P1
-                and existing.severity is Severity.P2
-            ):
-                existing.severity = submitted.severity
             materially_changed = False
+            if _SEVERITY_RANK[submitted.severity] > _SEVERITY_RANK[existing.severity]:
+                existing.severity = submitted.severity
+                materially_changed = True
             for field_name in ("evidence", "p2_evidence", "reproduction"):
                 submitted_value = getattr(submitted, field_name)
                 if (
@@ -154,7 +159,7 @@ class ReviewLedger(BaseModel):
             deferred_to_issue and deferred_to_issue.strip()
         ):
             raise ValueError("existing issue is required to defer a finding")
-        if finding.severity is Severity.P1:
+        if finding.severity in {Severity.P0, Severity.P1}:
             if disposition in {Disposition.REJECT, Disposition.STALE} and not (
                 evidence and evidence.strip()
             ):
