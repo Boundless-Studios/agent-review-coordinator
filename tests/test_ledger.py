@@ -121,6 +121,46 @@ class ReviewLedgerTest(unittest.TestCase):
                 rationale="",
             )
 
+    def test_declined_p2_records_rationale(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        ledger.submit(result())
+        fingerprint = ledger.current_findings[0].fingerprint
+
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DECLINED,
+            rationale="The path is unreachable in supported configurations.",
+        )
+
+        self.assertEqual(
+            ledger.current_findings[0].disposition,
+            Disposition.DECLINED,
+        )
+
+    def test_deferred_p2_requires_and_records_existing_issue(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        ledger.submit(result())
+        fingerprint = ledger.current_findings[0].fingerprint
+
+        with self.assertRaisesRegex(ValueError, "existing issue"):
+            ledger.record_disposition(
+                fingerprint=fingerprint,
+                disposition=Disposition.DEFERRED_TO_EXISTING_ISSUE,
+                rationale="The durable-state redesign belongs to existing work.",
+            )
+
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DEFERRED_TO_EXISTING_ISSUE,
+            rationale="The durable-state redesign belongs to existing work.",
+            deferred_to_issue="BOU-1234",
+        )
+
+        self.assertEqual(
+            ledger.current_findings[0].deferred_to_issue,
+            "BOU-1234",
+        )
+
     def test_ledger_round_trip_preserves_disposition(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
         ledger.submit(result())

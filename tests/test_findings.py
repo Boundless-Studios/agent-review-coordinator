@@ -1,6 +1,14 @@
 import unittest
 
-from agent_review_coordinator.findings import Disposition, Finding, Severity
+from agent_review_coordinator.findings import (
+    Disposition,
+    Finding,
+    FixCost,
+    Impact,
+    P2Evidence,
+    Reachability,
+    Severity,
+)
 
 
 def finding(
@@ -23,6 +31,51 @@ def finding(
 
 
 class FindingTest(unittest.TestCase):
+    def test_protocol_accepts_nonblocking_and_critical_severities(self) -> None:
+        self.assertEqual(
+            {
+                Finding.model_validate(
+                    finding().model_copy(update={"severity": severity}).model_dump()
+                ).severity
+                for severity in (Severity.P0, Severity.P3)
+            },
+            {Severity.P0, Severity.P3},
+        )
+
+    def test_p2_evidence_round_trips_decision_inputs(self) -> None:
+        evidence = P2Evidence(
+            reachability=Reachability.SUPPORTED,
+            impact=Impact.MEANINGFUL,
+            observed_recurrence=2,
+            interface_boundary_risk=True,
+            security_risk=False,
+            data_loss_risk=False,
+            durable_state_risk=True,
+            fix_cost=FixCost.CHEAP,
+        )
+        item = finding().model_copy(update={"p2_evidence": evidence})
+
+        restored = Finding.model_validate_json(item.model_dump_json())
+
+        self.assertEqual(
+            restored.p2_evidence.model_dump(mode="json"),
+            {
+                "schema_version": 1,
+                "reachability": "supported",
+                "impact": "meaningful",
+                "observed_recurrence": 2,
+                "interface_boundary_risk": True,
+                "security_risk": False,
+                "data_loss_risk": False,
+                "durable_state_risk": True,
+                "fix_cost": "cheap",
+            },
+        )
+
+    def test_explicit_settlement_dispositions_are_available(self) -> None:
+        self.assertIn(Disposition.DECLINED, Disposition)
+        self.assertIn(Disposition.DEFERRED_TO_EXISTING_ISSUE, Disposition)
+
     def test_independent_reviewers_share_fingerprint(self) -> None:
         first = finding(reviewer_execution_id="local-1", line=21)
         second = finding(reviewer_execution_id="local-2", line=27)

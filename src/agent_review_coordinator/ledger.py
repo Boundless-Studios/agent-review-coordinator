@@ -120,12 +120,17 @@ class ReviewLedger(BaseModel):
         rationale: str,
         evidence: str | None = None,
         duplicate_of: str | None = None,
+        deferred_to_issue: str | None = None,
     ) -> None:
         """Apply an evidence-backed disposition to a current finding."""
 
         if not rationale.strip():
             raise ValueError("disposition rationale is required")
         finding = self._finding(fingerprint)
+        if disposition is Disposition.DEFERRED_TO_EXISTING_ISSUE and not (
+            deferred_to_issue and deferred_to_issue.strip()
+        ):
+            raise ValueError("existing issue is required to defer a finding")
         if finding.severity is Severity.P1:
             if disposition in {Disposition.REJECT, Disposition.STALE} and not (
                 evidence and evidence.strip()
@@ -142,6 +147,11 @@ class ReviewLedger(BaseModel):
         finding.evidence = evidence.strip() if evidence and evidence.strip() else None
         finding.duplicate_of = (
             duplicate_of.strip() if duplicate_of and duplicate_of.strip() else None
+        )
+        finding.deferred_to_issue = (
+            deferred_to_issue.strip()
+            if deferred_to_issue and deferred_to_issue.strip()
+            else None
         )
 
     def record_reproduction(self, *, fingerprint: str, reproduction: str) -> None:
