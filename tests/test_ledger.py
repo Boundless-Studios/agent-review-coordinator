@@ -277,6 +277,26 @@ class ReviewLedgerTest(unittest.TestCase):
             "local-attempt-one",
         )
 
+    def test_retry_can_repair_duplicate_execution_identity_across_slots(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        first = result(execution_id="shared-execution")
+        second = result(execution_id="shared-execution").model_copy(
+            update={"slot_number": 2}
+        )
+        ledger.submit(first)
+        ledger.submit(second)
+        repaired = result(execution_id="independent-execution").model_copy(
+            update={"slot_number": 2, "round_number": 2}
+        )
+
+        ledger.submit(repaired)
+
+        self.assertEqual(len(ledger.results), 3)
+        self.assertEqual(
+            ledger.results[-1].reviewer_execution_id,
+            "independent-execution",
+        )
+
     def test_materially_new_evidence_is_retained(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
         original = result()
@@ -510,6 +530,24 @@ class ReviewLedgerTest(unittest.TestCase):
         )
 
         self.assertFalse(ledger.current_findings[0].verification_passed)
+
+    def test_recording_reproduction_reopens_declined_finding(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        ledger.submit(result())
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DECLINED,
+            rationale="No reproduction was known.",
+        )
+
+        ledger.record_reproduction(
+            fingerprint=fingerprint,
+            reproduction="Reproduced through a supported exact-head path.",
+        )
+
+        self.assertIsNone(ledger.current_findings[0].disposition)
+        self.assertIsNone(ledger.current_findings[0].rationale)
 
     def test_declining_incorrect_p0_requires_evidence(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)

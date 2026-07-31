@@ -93,15 +93,34 @@ def _is_retry_without_new_evidence(
     ledger: ReviewLedger,
     result: ReviewResult,
 ) -> bool:
-    same_responsibility = any(
-        not existing.stale
-        and existing.head_sha == result.head_sha
-        and existing.stage is result.stage
-        and existing.slot_number == result.slot_number
-        and existing.reviewer_provider == result.reviewer_provider
+    same_responsibility_results = [
+        existing
         for existing in ledger.results
-    )
-    if not same_responsibility:
+        if (
+            not existing.stale
+            and existing.head_sha == result.head_sha
+            and existing.stage is result.stage
+            and existing.slot_number == result.slot_number
+            and existing.reviewer_provider == result.reviewer_provider
+        )
+    ]
+    if not same_responsibility_results:
+        return False
+    current_responsibility = same_responsibility_results[-1]
+    other_execution_ids = {
+        existing.reviewer_execution_id
+        for existing in ledger.results
+        if (
+            not existing.stale
+            and existing.head_sha == result.head_sha
+            and existing.stage is result.stage
+            and existing.slot_number != result.slot_number
+        )
+    }
+    if (
+        current_responsibility.reviewer_execution_id in other_execution_ids
+        and result.reviewer_execution_id not in other_execution_ids
+    ):
         return False
 
     by_fingerprint = {item.fingerprint: item for item in ledger.findings}
@@ -319,7 +338,13 @@ class ReviewLedger(BaseModel):
 
         if not reproduction.strip():
             raise ValueError("reproduction evidence is required")
-        self._finding(fingerprint).reproduction = reproduction.strip()
+        finding = self._finding(fingerprint)
+        finding.reproduction = reproduction.strip()
+        finding.disposition = None
+        finding.rationale = None
+        finding.verification_passed = False
+        finding.duplicate_of = None
+        finding.deferred_to_issue = None
 
     def record_verification(self, *, fingerprint: str, passed: bool) -> None:
         """Record targeted verification for a current finding."""

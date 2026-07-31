@@ -202,6 +202,25 @@ class SettlementTest(unittest.TestCase):
             FindingSettlementState.DECLINED_WITH_RATIONALE,
         )
 
+    def test_unknown_p2_evidence_cannot_be_declined(self) -> None:
+        item = finding().model_copy(update={"p2_evidence": p2_evidence()})
+        ledger = reviewed_ledger(item)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DECLINED,
+            rationale="Nothing is known yet.",
+        )
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertIn("evaluate_p2", report.required_actions)
+        self.assertEqual(
+            report.finding_states[fingerprint],
+            FindingSettlementState.UNRESOLVED,
+        )
+
     def test_p2_can_defer_to_an_existing_issue(self) -> None:
         item = finding().model_copy(
             update={
@@ -245,6 +264,27 @@ class SettlementTest(unittest.TestCase):
             report.finding_states[fingerprint],
             FindingSettlementState.UNRESOLVED,
         )
+
+    def test_persisted_deferral_without_issue_reference_is_unresolved(self) -> None:
+        item = finding().model_copy(
+            update={
+                "p2_evidence": p2_evidence(
+                    reachability=Reachability.UNREACHABLE,
+                    impact=Impact.LOW,
+                    fix_cost=FixCost.ARCHITECTURAL,
+                ),
+            }
+        )
+        ledger = reviewed_ledger(item)
+        canonical = ledger.current_findings[0]
+        canonical.disposition = Disposition.DEFERRED_TO_EXISTING_ISSUE
+        canonical.rationale = "Tracked elsewhere."
+        canonical.deferred_to_issue = None
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertIn("evaluate_p2", report.required_actions)
 
     def test_late_exact_head_feedback_reopens_settlement(self) -> None:
         ledger = reviewed_ledger(finding(Severity.P3))
@@ -407,6 +447,22 @@ class SettlementTest(unittest.TestCase):
             evaluate(policy=policy(), ledger=ledger).required_actions,
         )
 
+    def test_prove_first_with_a_fix_signal_requires_fix(self) -> None:
+        item = finding().model_copy(
+            update={"p2_evidence": p2_evidence(security_risk=True)}
+        )
+        ledger = reviewed_ledger(item)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.PROVE_FIRST,
+            rationale="Legacy disposition.",
+        )
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertIn("fix_p2", report.required_actions)
+
     def test_missing_reviewer_result_blocks_settlement(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=HEAD)
         ledger.submit(result(stage=ReviewStage.LOCAL))
@@ -515,6 +571,60 @@ class SettlementTest(unittest.TestCase):
 
         self.assertFalse(report.settled)
         self.assertIn("local:2", report.missing_slots)
+
+    def test_specific_required_slot_cannot_be_replaced_by_optional_slot(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=HEAD)
+        required_slot_two = result(
+            stage=ReviewStage.LOCAL,
+            execution_id="required-two",
+        ).model_copy(update={"slot_number": 2})
+        optional_slot_three = result(
+            stage=ReviewStage.LOCAL,
+            execution_id="optional-three",
+        ).model_copy(update={"slot_number": 3})
+        ledger.submit(required_slot_two)
+        ledger.submit(optional_slot_three)
+        ledger.submit(result(stage=ReviewStage.BACKSTOP))
+        custom_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 3,
+                        "required_results": 2,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        )
+
+        report = evaluate(policy=custom_policy, ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertIn("local:1", report.missing_slots)
+
+    def test_persisted_decline_without_rationale_is_unresolved(self) -> None:
+        item = finding().model_copy(
+            update={
+                "p2_evidence": p2_evidence(
+                    reachability=Reachability.UNREACHABLE,
+                    impact=Impact.LOW,
+                    fix_cost=FixCost.ARCHITECTURAL,
+                ),
+            }
+        )
+        ledger = reviewed_ledger(item)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.current_findings[0].disposition = Disposition.DECLINED
+        ledger.current_findings[0].rationale = None
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertEqual(
+            report.finding_states[fingerprint],
+            FindingSettlementState.UNRESOLVED,
+        )
 
     def test_rejected_p1_requires_evidence(self) -> None:
         ledger = reviewed_ledger(finding(Severity.P1))

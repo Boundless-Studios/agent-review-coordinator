@@ -52,22 +52,22 @@ def _missing_for_stage(
         for result in ledger.results
         if not result.stale and result.stage is stage
     ]
-    results_by_slot = {
-        result.slot_number: result
-        for result in results
-        if result.slot_number <= stage_policy.reviewer_count
-    }
     required = stage_policy.required_results or stage_policy.reviewer_count
-    qualifying_count = len(results_by_slot)
-    if stage_policy.distinct_executions:
-        qualifying_count = min(
-            qualifying_count,
-            len({result.reviewer_execution_id for result in results_by_slot.values()}),
-        )
-    missing = [
-        f"{stage.value}:{slot_number}"
-        for slot_number in range(qualifying_count + 1, required + 1)
-    ]
+    results_by_slot = {result.slot_number: result for result in results}
+    missing: list[str] = []
+    seen_executions: set[str] = set()
+    for slot_number in range(1, required + 1):
+        result = results_by_slot.get(slot_number)
+        if result is None:
+            missing.append(f"{stage.value}:{slot_number}")
+            continue
+        if (
+            stage_policy.distinct_executions
+            and result.reviewer_execution_id in seen_executions
+        ):
+            missing.append(f"{stage.value}:{slot_number}")
+            continue
+        seen_executions.add(result.reviewer_execution_id)
     if stage_policy.distinct_providers:
         providers = {
             result.reviewer_provider
@@ -81,6 +81,14 @@ def _missing_for_stage(
 
 def _finding_action(finding: Finding) -> str | None:
     disposition = finding.disposition
+    if disposition is not None and not (
+        finding.rationale and finding.rationale.strip()
+    ):
+        return (
+            f"address_{finding.severity.value}"
+            if finding.severity in {Severity.P0, Severity.P1}
+            else "evaluate_p2"
+        )
     if finding.severity in {Severity.P0, Severity.P1}:
         if disposition is Disposition.FIXED:
             return None if finding.verification_passed else "verify_fix"
@@ -94,19 +102,29 @@ def _finding_action(finding: Finding) -> str | None:
         return None
 
     if disposition is None:
-        return "evaluate_p2"
+        return "fix_reproduced_p2" if finding.reproduction else "evaluate_p2"
     if disposition is Disposition.FIX_NOW:
         return "fix_p2"
     if disposition is Disposition.PROVE_FIRST:
+        if _p2_requires_fix(finding):
+            return "fix_p2"
         return "fix_reproduced_p2" if finding.reproduction else "prove_p2"
     if disposition is Disposition.FIXED:
         return None if finding.verification_passed else "verify_fix"
     if disposition is Disposition.DECLINED:
         if finding.p2_evidence is None:
             return "evaluate_p2"
-        return "fix_p2" if _p2_requires_fix(finding) else None
+        if _p2_requires_fix(finding):
+            return "fix_p2"
+        return None if _p2_decline_supported(finding) else "evaluate_p2"
     if disposition is Disposition.DEFERRED_TO_EXISTING_ISSUE:
-        return None if finding.p2_evidence is not None else "evaluate_p2"
+        return (
+            None
+            if finding.p2_evidence is not None
+            and finding.deferred_to_issue
+            and finding.deferred_to_issue.strip()
+            else "evaluate_p2"
+        )
     if disposition in {
         Disposition.DEFER,
         Disposition.REJECT,
@@ -115,7 +133,9 @@ def _finding_action(finding: Finding) -> str | None:
     }:
         if finding.p2_evidence is None:
             return "evaluate_p2"
-        return "fix_p2" if _p2_requires_fix(finding) else None
+        if _p2_requires_fix(finding):
+            return "fix_p2"
+        return None if _p2_decline_supported(finding) else "evaluate_p2"
     return None
 
 
@@ -133,7 +153,24 @@ def _p2_requires_fix(finding: Finding) -> bool:
             evidence.data_loss_risk,
             evidence.durable_state_risk,
             evidence.fix_cost is FixCost.CHEAP,
+            bool(finding.reproduction),
         )
+    )
+
+
+def _p2_decline_supported(finding: Finding) -> bool:
+    evidence = finding.p2_evidence
+    if evidence is None:
+        return False
+    return (
+        evidence.reachability is Reachability.UNREACHABLE
+        and evidence.impact is Impact.LOW
+        and evidence.observed_recurrence == 0
+        and not evidence.interface_boundary_risk
+        and not evidence.security_risk
+        and not evidence.data_loss_risk
+        and not evidence.durable_state_risk
+        and evidence.fix_cost is FixCost.ARCHITECTURAL
     )
 
 
