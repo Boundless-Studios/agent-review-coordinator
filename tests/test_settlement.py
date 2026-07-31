@@ -287,7 +287,16 @@ class SettlementTest(unittest.TestCase):
         self.assertFalse(report.allow_full_review)
 
     def test_deferred_p2_allows_settlement(self) -> None:
-        ledger = reviewed_ledger(finding())
+        item = finding().model_copy(
+            update={
+                "p2_evidence": p2_evidence(
+                    reachability=Reachability.UNREACHABLE,
+                    impact=Impact.LOW,
+                    fix_cost=FixCost.ARCHITECTURAL,
+                )
+            }
+        )
+        ledger = reviewed_ledger(item)
         fingerprint = ledger.current_findings[0].fingerprint
         ledger.record_disposition(
             fingerprint=fingerprint,
@@ -298,6 +307,44 @@ class SettlementTest(unittest.TestCase):
         report = evaluate(policy=policy(), ledger=ledger)
 
         self.assertTrue(report.settled)
+
+    def test_legacy_p2_dispositions_cannot_bypass_missing_evidence(self) -> None:
+        for disposition in (
+            Disposition.DEFER,
+            Disposition.REJECT,
+            Disposition.STALE,
+            Disposition.WRONG_OWNER,
+        ):
+            with self.subTest(disposition=disposition):
+                ledger = reviewed_ledger(finding())
+                fingerprint = ledger.current_findings[0].fingerprint
+                ledger.record_disposition(
+                    fingerprint=fingerprint,
+                    disposition=disposition,
+                    rationale="Legacy wire value without decision evidence.",
+                )
+
+                report = evaluate(policy=policy(), ledger=ledger)
+
+                self.assertFalse(report.settled)
+                self.assertIn("evaluate_p2", report.required_actions)
+
+    def test_legacy_decline_cannot_override_a_fix_signal(self) -> None:
+        item = finding().model_copy(
+            update={"p2_evidence": p2_evidence(security_risk=True)}
+        )
+        ledger = reviewed_ledger(item)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.REJECT,
+            rationale="Legacy decline value.",
+        )
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertIn("fix_p2", report.required_actions)
 
     def test_unevaluated_p2_blocks_for_evaluation_not_implementation(self) -> None:
         report = evaluate(policy=policy(), ledger=reviewed_ledger(finding()))
@@ -482,6 +529,17 @@ class SettlementTest(unittest.TestCase):
 
     def test_duplicate_p1_requires_duplicate_target(self) -> None:
         ledger = reviewed_ledger(finding(Severity.P1))
+        fingerprint = ledger.current_findings[0].fingerprint
+
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            ledger.record_disposition(
+                fingerprint=fingerprint,
+                disposition=Disposition.DUPLICATE,
+                rationale="Covered by another finding.",
+            )
+
+    def test_duplicate_p2_requires_duplicate_target(self) -> None:
+        ledger = reviewed_ledger(finding())
         fingerprint = ledger.current_findings[0].fingerprint
 
         with self.assertRaisesRegex(ValueError, "duplicate"):

@@ -6,7 +6,15 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .findings import Disposition, Finding, Severity
+from .findings import (
+    Disposition,
+    Finding,
+    FixCost,
+    Impact,
+    P2Evidence,
+    Reachability,
+    Severity,
+)
 from .policy import ReviewStage
 
 _SEVERITY_RANK = {
@@ -15,6 +23,104 @@ _SEVERITY_RANK = {
     Severity.P1: 2,
     Severity.P0: 3,
 }
+
+
+def _merge_p2_evidence(
+    current: P2Evidence | None,
+    submitted: P2Evidence | None,
+) -> P2Evidence | None:
+    """Merge decision evidence without allowing a retry to weaken it."""
+
+    if current is None:
+        return submitted
+    if submitted is None:
+        return current
+
+    reachability_rank = {
+        Reachability.UNKNOWN: 0,
+        Reachability.UNREACHABLE: 1,
+        Reachability.SUPPORTED: 2,
+    }
+    impact_rank = {
+        Impact.UNKNOWN: 0,
+        Impact.LOW: 1,
+        Impact.MEANINGFUL: 2,
+    }
+    fix_cost_rank = {
+        FixCost.ARCHITECTURAL: 0,
+        FixCost.MODERATE: 1,
+        FixCost.CHEAP: 2,
+    }
+    if current.fix_cost is FixCost.UNKNOWN:
+        fix_cost = submitted.fix_cost
+    elif submitted.fix_cost is FixCost.UNKNOWN:
+        fix_cost = current.fix_cost
+    else:
+        fix_cost = max(
+            (current.fix_cost, submitted.fix_cost),
+            key=fix_cost_rank.__getitem__,
+        )
+
+    return current.model_copy(
+        update={
+            "reachability": max(
+                (current.reachability, submitted.reachability),
+                key=reachability_rank.__getitem__,
+            ),
+            "impact": max(
+                (current.impact, submitted.impact),
+                key=impact_rank.__getitem__,
+            ),
+            "observed_recurrence": max(
+                current.observed_recurrence,
+                submitted.observed_recurrence,
+            ),
+            "interface_boundary_risk": (
+                current.interface_boundary_risk or submitted.interface_boundary_risk
+            ),
+            "security_risk": current.security_risk or submitted.security_risk,
+            "data_loss_risk": current.data_loss_risk or submitted.data_loss_risk,
+            "durable_state_risk": (
+                current.durable_state_risk or submitted.durable_state_risk
+            ),
+            "fix_cost": fix_cost,
+        }
+    )
+
+
+def _is_retry_without_new_evidence(
+    *,
+    ledger: ReviewLedger,
+    result: ReviewResult,
+) -> bool:
+    same_responsibility = any(
+        not existing.stale
+        and existing.head_sha == result.head_sha
+        and existing.stage is result.stage
+        and existing.slot_number == result.slot_number
+        and existing.reviewer_provider == result.reviewer_provider
+        for existing in ledger.results
+    )
+    if not same_responsibility:
+        return False
+
+    by_fingerprint = {item.fingerprint: item for item in ledger.findings}
+    for submitted in result.findings:
+        existing = by_fingerprint.get(submitted.fingerprint)
+        if existing is None:
+            return False
+        if _SEVERITY_RANK[submitted.severity] > _SEVERITY_RANK[existing.severity]:
+            return False
+        if existing.evidence is None and submitted.evidence:
+            return False
+        if existing.reproduction is None and submitted.reproduction:
+            return False
+        if (
+            _merge_p2_evidence(existing.p2_evidence, submitted.p2_evidence)
+            != existing.p2_evidence
+        ):
+            return False
+    return True
 
 
 class ReviewResult(BaseModel):
@@ -93,12 +199,15 @@ class ReviewLedger(BaseModel):
             self.results.append(result.model_copy(update={"stale": True}, deep=True))
             return
 
-        submitted_content = result.model_dump(mode="json", exclude={"stale"})
-        if any(
-            existing.model_dump(mode="json", exclude={"stale"}) == submitted_content
-            for existing in self.results
-            if not existing.stale
-        ):
+        if _is_retry_without_new_evidence(ledger=self, result=result):
+            by_fingerprint = {item.fingerprint: item for item in self.findings}
+            for submitted in result.findings:
+                existing = by_fingerprint.get(submitted.fingerprint)
+                if existing is None:
+                    continue
+                for execution_id in submitted.contributing_execution_ids:
+                    if execution_id not in existing.contributing_execution_ids:
+                        existing.contributing_execution_ids.append(execution_id)
             return
 
         self.results.append(result.model_copy(deep=True))
@@ -122,13 +231,19 @@ class ReviewLedger(BaseModel):
             if _SEVERITY_RANK[submitted.severity] > _SEVERITY_RANK[existing.severity]:
                 existing.severity = submitted.severity
                 materially_changed = True
-            for field_name in ("evidence", "p2_evidence", "reproduction"):
-                submitted_value = getattr(submitted, field_name)
-                if submitted_value is not None and submitted_value != getattr(
-                    existing, field_name
-                ):
-                    setattr(existing, field_name, submitted_value)
-                    materially_changed = True
+            if existing.evidence is None and submitted.evidence:
+                existing.evidence = " ".join(submitted.evidence.split())
+                materially_changed = True
+            merged_p2_evidence = _merge_p2_evidence(
+                existing.p2_evidence,
+                submitted.p2_evidence,
+            )
+            if merged_p2_evidence != existing.p2_evidence:
+                existing.p2_evidence = merged_p2_evidence
+                materially_changed = True
+            if existing.reproduction is None and submitted.reproduction:
+                existing.reproduction = " ".join(submitted.reproduction.split())
+                materially_changed = True
             if materially_changed:
                 existing.disposition = None
                 existing.rationale = None
@@ -158,20 +273,22 @@ class ReviewLedger(BaseModel):
             deferred_to_issue and deferred_to_issue.strip()
         ):
             raise ValueError("existing issue is required to defer a finding")
-        if finding.severity in {Severity.P0, Severity.P1}:
-            if disposition in {Disposition.REJECT, Disposition.STALE} and not (
-                evidence and evidence.strip()
-            ):
-                raise ValueError("evidence is required to dismiss a P1")
-            if disposition is Disposition.DUPLICATE and not (
-                duplicate_of and duplicate_of.strip()
-            ):
-                raise ValueError("duplicate target is required to dismiss a P1")
+        if disposition is Disposition.DUPLICATE and not (
+            duplicate_of and duplicate_of.strip()
+        ):
+            raise ValueError("duplicate target is required to dismiss a finding")
+        if (
+            finding.severity in {Severity.P0, Severity.P1}
+            and disposition in {Disposition.REJECT, Disposition.STALE}
+            and not (evidence and evidence.strip())
+        ):
+            raise ValueError("evidence is required to dismiss a P0/P1")
         if finding.disposition is not disposition:
             finding.verification_passed = False
         finding.disposition = disposition
         finding.rationale = rationale.strip()
-        finding.evidence = evidence.strip() if evidence and evidence.strip() else None
+        if evidence and evidence.strip():
+            finding.evidence = evidence.strip()
         finding.duplicate_of = (
             duplicate_of.strip() if duplicate_of and duplicate_of.strip() else None
         )

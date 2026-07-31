@@ -76,6 +76,28 @@ class ReviewPolicyTest(unittest.TestCase):
             [True, True, False],
         )
 
+    def test_provider_diversity_is_part_of_requirement_contract(self) -> None:
+        policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 2,
+                        "required_results": 2,
+                        "distinct_providers": True,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        )
+
+        requirements = policy.requirements_for(stage=ReviewStage.LOCAL)
+
+        self.assertEqual(
+            [requirement.provider_constraint for requirement in requirements],
+            ["distinct", "distinct"],
+        )
+
     def test_double_review_policy_creates_provider_neutral_slots(self) -> None:
         policy = ReviewPolicy.model_validate(
             {

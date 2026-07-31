@@ -1,6 +1,14 @@
 import unittest
 
-from agent_review_coordinator.findings import Disposition, Finding, Severity
+from agent_review_coordinator.findings import (
+    Disposition,
+    Finding,
+    FixCost,
+    Impact,
+    P2Evidence,
+    Reachability,
+    Severity,
+)
 from agent_review_coordinator.ledger import ReviewLedger, ReviewResult
 from agent_review_coordinator.policy import ReviewStage
 
@@ -42,6 +50,128 @@ def result(
 
 
 class ReviewLedgerTest(unittest.TestCase):
+    def test_rephrased_text_evidence_does_not_reopen_or_consume_a_run(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        original_finding = finding().model_copy(
+            update={"evidence": "Observed on a supported path."}
+        )
+        original = result().model_copy(update={"findings": [original_finding]})
+        ledger.submit(original)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DECLINED,
+            rationale="Recorded for retry-idempotency coverage.",
+        )
+        rephrased = original_finding.model_copy(
+            update={"evidence": "Seen through the supported path."}
+        )
+        retry = result(execution_id="local-retry").model_copy(
+            update={"round_number": 2, "findings": [rephrased]}
+        )
+
+        ledger.submit(retry)
+
+        self.assertEqual(len(ledger.results), 1)
+        self.assertEqual(
+            ledger.current_findings[0].disposition,
+            Disposition.DECLINED,
+        )
+        self.assertEqual(
+            ledger.current_findings[0].evidence,
+            "Observed on a supported path.",
+        )
+
+    def test_weaker_structured_evidence_cannot_reopen_or_overwrite(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        stronger = P2Evidence(
+            reachability=Reachability.SUPPORTED,
+            impact=Impact.MEANINGFUL,
+            observed_recurrence=2,
+            interface_boundary_risk=True,
+            security_risk=True,
+            data_loss_risk=False,
+            durable_state_risk=True,
+            fix_cost=FixCost.CHEAP,
+        )
+        original_finding = finding().model_copy(update={"p2_evidence": stronger})
+        original = result().model_copy(update={"findings": [original_finding]})
+        ledger.submit(original)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DEFERRED_TO_EXISTING_ISSUE,
+            rationale="The existing security redesign owns the fix.",
+            deferred_to_issue="BOU-1234",
+        )
+        weaker = P2Evidence(
+            reachability=Reachability.UNREACHABLE,
+            impact=Impact.LOW,
+            observed_recurrence=0,
+            interface_boundary_risk=False,
+            security_risk=False,
+            data_loss_risk=False,
+            durable_state_risk=False,
+            fix_cost=FixCost.ARCHITECTURAL,
+        )
+        retry_finding = original_finding.model_copy(update={"p2_evidence": weaker})
+        retry = result(execution_id="local-retry").model_copy(
+            update={"round_number": 2, "findings": [retry_finding]}
+        )
+
+        ledger.submit(retry)
+
+        canonical = ledger.current_findings[0]
+        self.assertEqual(len(ledger.results), 1)
+        self.assertEqual(canonical.p2_evidence, stronger)
+        self.assertEqual(
+            canonical.disposition,
+            Disposition.DEFERRED_TO_EXISTING_ISSUE,
+        )
+
+    def test_stronger_structured_evidence_merges_monotonically(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        initial = P2Evidence(
+            reachability=Reachability.UNREACHABLE,
+            impact=Impact.LOW,
+            observed_recurrence=0,
+            interface_boundary_risk=False,
+            security_risk=False,
+            data_loss_risk=False,
+            durable_state_risk=False,
+            fix_cost=FixCost.ARCHITECTURAL,
+        )
+        original_finding = finding().model_copy(update={"p2_evidence": initial})
+        original = result().model_copy(update={"findings": [original_finding]})
+        ledger.submit(original)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DECLINED,
+            rationale="Initially unreachable and expensive.",
+        )
+        stronger = P2Evidence(
+            reachability=Reachability.SUPPORTED,
+            impact=Impact.MEANINGFUL,
+            observed_recurrence=3,
+            interface_boundary_risk=False,
+            security_risk=True,
+            data_loss_risk=False,
+            durable_state_risk=True,
+            fix_cost=FixCost.CHEAP,
+        )
+        retry_finding = original_finding.model_copy(update={"p2_evidence": stronger})
+        retry = result(execution_id="local-retry").model_copy(
+            update={"round_number": 2, "findings": [retry_finding]}
+        )
+
+        ledger.submit(retry)
+
+        canonical = ledger.current_findings[0]
+        self.assertEqual(len(ledger.results), 2)
+        self.assertEqual(canonical.p2_evidence, stronger)
+        self.assertIsNone(canonical.disposition)
+
     def test_identical_resubmission_is_idempotent(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
         review_result = result()
@@ -51,6 +181,21 @@ class ReviewLedgerTest(unittest.TestCase):
 
         self.assertEqual(len(ledger.results), 1)
         self.assertEqual(len(ledger.current_findings), 1)
+
+    def test_retry_with_new_execution_and_round_is_idempotent(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        ledger.submit(result(execution_id="local-attempt-one"))
+        retry = result(execution_id="local-attempt-two").model_copy(
+            update={"round_number": 2}
+        )
+
+        ledger.submit(retry)
+
+        self.assertEqual(len(ledger.results), 1)
+        self.assertEqual(
+            ledger.results[0].reviewer_execution_id,
+            "local-attempt-one",
+        )
 
     def test_materially_new_evidence_is_retained(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)

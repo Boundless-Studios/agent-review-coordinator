@@ -134,6 +134,12 @@ class ReviewPolicy(BaseModel):
             ReviewRequirement(
                 slot=f"{stage.value}:{slot_number}",
                 required=slot_number <= required_results,
+                provider_constraint=(
+                    "distinct"
+                    if stage_policy.distinct_providers
+                    and slot_number <= required_results
+                    else None
+                ),
             )
             for slot_number in range(1, stage_policy.reviewer_count + 1)
         ]

@@ -107,6 +107,15 @@ def _finding_action(finding: Finding) -> str | None:
         return "fix_p2" if _p2_requires_fix(finding) else None
     if disposition is Disposition.DEFERRED_TO_EXISTING_ISSUE:
         return None if finding.p2_evidence is not None else "evaluate_p2"
+    if disposition in {
+        Disposition.DEFER,
+        Disposition.REJECT,
+        Disposition.STALE,
+        Disposition.WRONG_OWNER,
+    }:
+        if finding.p2_evidence is None:
+            return "evaluate_p2"
+        return "fix_p2" if _p2_requires_fix(finding) else None
     return None
 
 
