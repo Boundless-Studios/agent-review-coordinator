@@ -86,6 +86,14 @@ class ReviewLedger(BaseModel):
             self.results.append(result.model_copy(update={"stale": True}, deep=True))
             return
 
+        submitted_content = result.model_dump(mode="json", exclude={"stale"})
+        if any(
+            existing.model_dump(mode="json", exclude={"stale"}) == submitted_content
+            for existing in self.results
+            if not existing.stale
+        ):
+            return
+
         self.results.append(result.model_copy(deep=True))
         by_fingerprint = {item.fingerprint: item for item in self.findings}
         for submitted in result.findings:
@@ -108,6 +116,21 @@ class ReviewLedger(BaseModel):
                 and existing.severity is Severity.P2
             ):
                 existing.severity = submitted.severity
+            materially_changed = False
+            for field_name in ("evidence", "p2_evidence", "reproduction"):
+                submitted_value = getattr(submitted, field_name)
+                if (
+                    submitted_value is not None
+                    and submitted_value != getattr(existing, field_name)
+                ):
+                    setattr(existing, field_name, submitted_value)
+                    materially_changed = True
+            if materially_changed:
+                existing.disposition = None
+                existing.rationale = None
+                existing.verification_passed = False
+                existing.duplicate_of = None
+                existing.deferred_to_issue = None
             for execution_id in submitted.contributing_execution_ids:
                 if execution_id not in existing.contributing_execution_ids:
                     existing.contributing_execution_ids.append(execution_id)

@@ -42,6 +42,33 @@ def result(
 
 
 class ReviewLedgerTest(unittest.TestCase):
+    def test_identical_resubmission_is_idempotent(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        review_result = result()
+
+        ledger.submit(review_result)
+        ledger.submit(review_result)
+
+        self.assertEqual(len(ledger.results), 1)
+        self.assertEqual(len(ledger.current_findings), 1)
+
+    def test_materially_new_evidence_is_retained(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        original = result()
+        new_finding = original.findings[0].model_copy(
+            update={"evidence": "Observed twice on an exact-head required-check run."}
+        )
+        new_result = original.model_copy(update={"findings": [new_finding]})
+
+        ledger.submit(original)
+        ledger.submit(new_result)
+
+        self.assertEqual(len(ledger.results), 2)
+        self.assertEqual(
+            ledger.current_findings[0].evidence,
+            "Observed twice on an exact-head required-check run.",
+        )
+
     def test_stale_findings_are_excluded_from_current_snapshot(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
 
@@ -89,6 +116,25 @@ class ReviewLedgerTest(unittest.TestCase):
         ledger.submit(p1_result)
 
         self.assertEqual(ledger.current_findings[0].severity, Severity.P1)
+
+    def test_materially_new_evidence_reopens_a_settled_finding(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        original = result()
+        ledger.submit(original)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DECLINED,
+            rationale="No supported path was known.",
+        )
+
+        new_finding = original.findings[0].model_copy(
+            update={"evidence": "Observed on a supported exact-head path."}
+        )
+        ledger.submit(original.model_copy(update={"findings": [new_finding]}))
+
+        self.assertIsNone(ledger.current_findings[0].disposition)
+        self.assertIsNone(ledger.current_findings[0].rationale)
 
     def test_reviewer_submission_cannot_set_settlement_state(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)

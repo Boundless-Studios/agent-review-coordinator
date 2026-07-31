@@ -191,6 +191,57 @@ class SettlementTest(unittest.TestCase):
         self.assertFalse(report.settled)
         self.assertIn("local:provider-diversity", report.missing_slots)
 
+    def test_two_providers_satisfy_two_required_slots(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=HEAD)
+        ledger.submit(
+            result(
+                stage=ReviewStage.LOCAL,
+                execution_id="review-one",
+                provider="provider-one",
+            )
+        )
+        second = result(
+            stage=ReviewStage.LOCAL,
+            execution_id="review-two",
+            provider="provider-two",
+        ).model_copy(update={"slot_number": 2})
+        ledger.submit(second)
+        ledger.submit(result(stage=ReviewStage.BACKSTOP))
+
+        report = evaluate(
+            policy=policy(
+                distinct_providers=True,
+                reviewer_count=2,
+            ),
+            ledger=ledger,
+        )
+
+        self.assertTrue(report.settled)
+
+    def test_one_provider_can_fill_two_independent_executions(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=HEAD)
+        ledger.submit(
+            result(
+                stage=ReviewStage.LOCAL,
+                execution_id="review-one",
+                provider="one-provider",
+            )
+        )
+        second = result(
+            stage=ReviewStage.LOCAL,
+            execution_id="review-two",
+            provider="one-provider",
+        ).model_copy(update={"slot_number": 2})
+        ledger.submit(second)
+        ledger.submit(result(stage=ReviewStage.BACKSTOP))
+
+        report = evaluate(
+            policy=policy(reviewer_count=2),
+            ledger=ledger,
+        )
+
+        self.assertTrue(report.settled)
+
     def test_non_distinct_execution_policy_counts_filled_slots(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=HEAD)
         ledger.submit(
