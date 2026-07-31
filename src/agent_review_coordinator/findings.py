@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from enum import StrEnum
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -13,8 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class Severity(StrEnum):
     """Merge-relevant severities supported by protocol version 1."""
 
+    P0 = "p0"
     P1 = "p1"
     P2 = "p2"
+    P3 = "p3"
 
 
 class Disposition(StrEnum):
@@ -28,6 +30,67 @@ class Disposition(StrEnum):
     STALE = "stale"
     WRONG_OWNER = "wrong_owner"
     FIXED = "fixed"
+    DECLINED = "declined"
+    DEFERRED_TO_EXISTING_ISSUE = "deferred_to_existing_issue"
+
+
+class Reachability(StrEnum):
+    """Whether a finding can occur in supported use."""
+
+    SUPPORTED = "supported"
+    UNREACHABLE = "unreachable"
+    UNKNOWN = "unknown"
+
+
+class Impact(StrEnum):
+    """Observed or expected user/system impact."""
+
+    MEANINGFUL = "meaningful"
+    LOW = "low"
+    UNKNOWN = "unknown"
+
+
+class FixCost(StrEnum):
+    """Relative cost of defending the existing interface."""
+
+    CHEAP = "cheap"
+    MODERATE = "moderate"
+    ARCHITECTURAL = "architectural"
+    UNKNOWN = "unknown"
+
+
+class EvidenceKind(StrEnum):
+    """How a keyed evidence artifact supports a finding."""
+
+    OBSERVATION = "observation"
+    REPRODUCTION = "reproduction"
+
+
+class EvidenceArtifact(BaseModel):
+    """Stable evidence identity whose summary may be rephrased."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    key: str = Field(min_length=1)
+    kind: EvidenceKind
+    summary: str = Field(min_length=1)
+
+
+class P2Evidence(BaseModel):
+    """Decision inputs required for an evidence-based P2 disposition."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    reachability: Reachability
+    impact: Impact
+    observed_recurrence: int = Field(ge=0)
+    interface_boundary_risk: bool
+    security_risk: bool
+    data_loss_risk: bool
+    durable_state_risk: bool
+    fix_cost: FixCost
 
 
 def _normalize(value: str) -> str:
@@ -75,8 +138,11 @@ class Finding(BaseModel):
     line: int | None = Field(default=None, ge=1)
     invariant: str = Field(min_length=1)
     evidence: str | None = None
+    evidence_artifacts: list[EvidenceArtifact] = Field(default_factory=list)
+    p2_evidence: P2Evidence | None = None
     reproduction: str | None = None
     duplicate_of: str | None = None
+    deferred_to_issue: str | None = None
     contributing_execution_ids: list[str] = Field(default_factory=list)
     fingerprint: str = ""
     disposition: Disposition | None = None

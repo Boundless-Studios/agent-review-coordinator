@@ -72,6 +72,17 @@ class ReviewerSlot(BaseModel):
     provider: None = None
 
 
+class ReviewRequirement(BaseModel):
+    """One provider-neutral review responsibility."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    slot: str = Field(min_length=1)
+    required: bool
+    provider_constraint: str | None = Field(default=None, min_length=1)
+
+
 class ReviewPolicy(BaseModel):
     """Versioned review topology and settlement policy."""
 
@@ -110,6 +121,25 @@ class ReviewPolicy(BaseModel):
                 round_number=round_number,
                 slot_number=slot_number,
                 execution_id=f"{stage.value}-r{round_number}-slot{slot_number}",
+            )
+            for slot_number in range(1, stage_policy.reviewer_count + 1)
+        ]
+
+    def requirements_for(self, *, stage: ReviewStage) -> list[ReviewRequirement]:
+        """Return the provider-neutral responsibilities for one stage."""
+
+        stage_policy = getattr(self.review, stage.value)
+        required_results = stage_policy.required_results or stage_policy.reviewer_count
+        return [
+            ReviewRequirement(
+                slot=f"{stage.value}:{slot_number}",
+                required=slot_number <= required_results,
+                provider_constraint=(
+                    "distinct"
+                    if stage_policy.distinct_providers
+                    and slot_number <= required_results
+                    else None
+                ),
             )
             for slot_number in range(1, stage_policy.reviewer_count + 1)
         ]

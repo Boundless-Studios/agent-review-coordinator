@@ -9,7 +9,15 @@ import unittest
 from pathlib import Path
 
 from agent_review_coordinator.cli import _ledger_lock, main
-from agent_review_coordinator.findings import Finding, Severity
+from agent_review_coordinator.findings import (
+    Disposition,
+    Finding,
+    FixCost,
+    Impact,
+    P2Evidence,
+    Reachability,
+    Severity,
+)
 from agent_review_coordinator.ledger import ReviewLedger, ReviewResult
 from agent_review_coordinator.policy import ReviewStage
 
@@ -48,6 +56,30 @@ def run_cli(argv: list[str]) -> tuple[int, str, str]:
 
 
 class CliTest(unittest.TestCase):
+    def test_requirements_print_versioned_provider_neutral_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            policy_path = Path(directory) / "policy.yaml"
+            write_policy(policy_path)
+
+            code, stdout, _ = run_cli(
+                [
+                    "requirements",
+                    "--policy",
+                    str(policy_path),
+                    "--stage",
+                    "local",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            json.loads(stdout),
+            [
+                {"required": True, "schema_version": 1, "slot": "local:1"},
+                {"required": True, "schema_version": 1, "slot": "local:2"},
+            ],
+        )
+
     def test_slots_print_provider_neutral_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             policy_path = Path(directory) / "policy.yaml"
@@ -148,6 +180,62 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(stored.findings[0].disposition.value, "defer")
+
+    def test_cli_round_trips_evidence_and_existing_issue_deferral(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "ledger.json"
+            item = Finding(
+                repository=REPOSITORY,
+                head_sha=HEAD,
+                reviewer_execution_id="local-r1-slot1",
+                severity=Severity.P2,
+                title="Guard durable state",
+                explanation="A retry can overwrite a newer disposition.",
+                path="src/ledger.py",
+                invariant="Stale writers cannot replace durable state",
+                p2_evidence=P2Evidence(
+                    reachability=Reachability.SUPPORTED,
+                    impact=Impact.MEANINGFUL,
+                    observed_recurrence=1,
+                    interface_boundary_risk=True,
+                    security_risk=False,
+                    data_loss_risk=False,
+                    durable_state_risk=True,
+                    fix_cost=FixCost.ARCHITECTURAL,
+                ),
+            )
+            ledger_path.write_text(
+                ReviewLedger(
+                    repository=REPOSITORY,
+                    head_sha=HEAD,
+                    findings=[item],
+                ).model_dump_json(),
+                encoding="utf-8",
+            )
+
+            code, stdout, _ = run_cli(
+                [
+                    "disposition",
+                    "--ledger",
+                    str(ledger_path),
+                    "--fingerprint",
+                    item.fingerprint,
+                    "--disposition",
+                    Disposition.DEFERRED_TO_EXISTING_ISSUE.value,
+                    "--rationale",
+                    "The durable-state redesign already owns this work.",
+                    "--deferred-to-issue",
+                    "BOU-1234",
+                ]
+            )
+
+        payload = json.loads(stdout)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["findings"][0]["deferred_to_issue"], "BOU-1234")
+        self.assertEqual(
+            payload["findings"][0]["p2_evidence"]["reachability"],
+            "supported",
+        )
 
     def test_settle_returns_ten_when_action_remains(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

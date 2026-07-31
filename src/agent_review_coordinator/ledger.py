@@ -6,8 +6,148 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .findings import Disposition, Finding, Severity
+from .findings import (
+    Disposition,
+    Finding,
+    FixCost,
+    Impact,
+    P2Evidence,
+    Reachability,
+    Severity,
+)
 from .policy import ReviewStage
+
+_SEVERITY_RANK = {
+    Severity.P3: 0,
+    Severity.P2: 1,
+    Severity.P1: 2,
+    Severity.P0: 3,
+}
+
+
+def _merge_p2_evidence(
+    current: P2Evidence | None,
+    submitted: P2Evidence | None,
+) -> P2Evidence | None:
+    """Merge decision evidence without allowing a retry to weaken it."""
+
+    if current is None:
+        return submitted
+    if submitted is None:
+        return current
+
+    reachability_rank = {
+        Reachability.UNKNOWN: 0,
+        Reachability.UNREACHABLE: 1,
+        Reachability.SUPPORTED: 2,
+    }
+    impact_rank = {
+        Impact.UNKNOWN: 0,
+        Impact.LOW: 1,
+        Impact.MEANINGFUL: 2,
+    }
+    fix_cost_rank = {
+        FixCost.ARCHITECTURAL: 0,
+        FixCost.MODERATE: 1,
+        FixCost.CHEAP: 2,
+    }
+    if current.fix_cost is FixCost.UNKNOWN:
+        fix_cost = submitted.fix_cost
+    elif submitted.fix_cost is FixCost.UNKNOWN:
+        fix_cost = current.fix_cost
+    else:
+        fix_cost = max(
+            (current.fix_cost, submitted.fix_cost),
+            key=fix_cost_rank.__getitem__,
+        )
+
+    return current.model_copy(
+        update={
+            "reachability": max(
+                (current.reachability, submitted.reachability),
+                key=reachability_rank.__getitem__,
+            ),
+            "impact": max(
+                (current.impact, submitted.impact),
+                key=impact_rank.__getitem__,
+            ),
+            "observed_recurrence": max(
+                current.observed_recurrence,
+                submitted.observed_recurrence,
+            ),
+            "interface_boundary_risk": (
+                current.interface_boundary_risk or submitted.interface_boundary_risk
+            ),
+            "security_risk": current.security_risk or submitted.security_risk,
+            "data_loss_risk": current.data_loss_risk or submitted.data_loss_risk,
+            "durable_state_risk": (
+                current.durable_state_risk or submitted.durable_state_risk
+            ),
+            "fix_cost": fix_cost,
+        }
+    )
+
+
+def _is_retry_without_new_evidence(
+    *,
+    ledger: ReviewLedger,
+    result: ReviewResult,
+) -> bool:
+    same_responsibility_results = [
+        existing
+        for existing in ledger.results
+        if (
+            not existing.stale
+            and existing.head_sha == result.head_sha
+            and existing.stage is result.stage
+            and existing.slot_number == result.slot_number
+            and existing.reviewer_provider == result.reviewer_provider
+        )
+    ]
+    if not same_responsibility_results:
+        return False
+    current_responsibility = same_responsibility_results[-1]
+    other_execution_ids = {
+        existing.reviewer_execution_id
+        for existing in ledger.results
+        if (
+            not existing.stale
+            and existing.head_sha == result.head_sha
+            and existing.stage is result.stage
+            and existing.slot_number != result.slot_number
+        )
+    }
+    if (
+        current_responsibility.reviewer_execution_id in other_execution_ids
+        and result.reviewer_execution_id not in other_execution_ids
+    ):
+        return False
+
+    by_fingerprint = {item.fingerprint: item for item in ledger.findings}
+    for submitted in result.findings:
+        existing = by_fingerprint.get(submitted.fingerprint)
+        if existing is None:
+            return False
+        if _SEVERITY_RANK[submitted.severity] > _SEVERITY_RANK[existing.severity]:
+            return False
+        if existing.evidence is None and submitted.evidence:
+            return False
+        if existing.reproduction is None and submitted.reproduction:
+            return False
+        existing_artifact_keys = {
+            artifact.key for artifact in existing.evidence_artifacts
+        }
+        if any(
+            artifact.key not in existing_artifact_keys
+            for artifact in submitted.evidence_artifacts
+        ):
+            return False
+        if (
+            _merge_p2_evidence(existing.p2_evidence, submitted.p2_evidence)
+            != existing.p2_evidence
+        ):
+            return False
+    return True
 
 
 class ReviewResult(BaseModel):
@@ -86,6 +226,17 @@ class ReviewLedger(BaseModel):
             self.results.append(result.model_copy(update={"stale": True}, deep=True))
             return
 
+        if _is_retry_without_new_evidence(ledger=self, result=result):
+            by_fingerprint = {item.fingerprint: item for item in self.findings}
+            for submitted in result.findings:
+                existing = by_fingerprint.get(submitted.fingerprint)
+                if existing is None:
+                    continue
+                for execution_id in submitted.contributing_execution_ids:
+                    if execution_id not in existing.contributing_execution_ids:
+                        existing.contributing_execution_ids.append(execution_id)
+            return
+
         self.results.append(result.model_copy(deep=True))
         by_fingerprint = {item.fingerprint: item for item in self.findings}
         for submitted in result.findings:
@@ -103,11 +254,37 @@ class ReviewLedger(BaseModel):
                 self.findings.append(canonical)
                 by_fingerprint[canonical.fingerprint] = canonical
                 continue
-            if (
-                submitted.severity is Severity.P1
-                and existing.severity is Severity.P2
-            ):
+            materially_changed = False
+            if _SEVERITY_RANK[submitted.severity] > _SEVERITY_RANK[existing.severity]:
                 existing.severity = submitted.severity
+                materially_changed = True
+            if existing.evidence is None and submitted.evidence:
+                existing.evidence = " ".join(submitted.evidence.split())
+                materially_changed = True
+            merged_p2_evidence = _merge_p2_evidence(
+                existing.p2_evidence,
+                submitted.p2_evidence,
+            )
+            if merged_p2_evidence != existing.p2_evidence:
+                existing.p2_evidence = merged_p2_evidence
+                materially_changed = True
+            if existing.reproduction is None and submitted.reproduction:
+                existing.reproduction = " ".join(submitted.reproduction.split())
+                materially_changed = True
+            existing_artifact_keys = {
+                artifact.key for artifact in existing.evidence_artifacts
+            }
+            for artifact in submitted.evidence_artifacts:
+                if artifact.key not in existing_artifact_keys:
+                    existing.evidence_artifacts.append(artifact)
+                    existing_artifact_keys.add(artifact.key)
+                    materially_changed = True
+            if materially_changed:
+                existing.disposition = None
+                existing.rationale = None
+                existing.verification_passed = False
+                existing.duplicate_of = None
+                existing.deferred_to_issue = None
             for execution_id in submitted.contributing_execution_ids:
                 if execution_id not in existing.contributing_execution_ids:
                     existing.contributing_execution_ids.append(execution_id)
@@ -120,28 +297,40 @@ class ReviewLedger(BaseModel):
         rationale: str,
         evidence: str | None = None,
         duplicate_of: str | None = None,
+        deferred_to_issue: str | None = None,
     ) -> None:
         """Apply an evidence-backed disposition to a current finding."""
 
         if not rationale.strip():
             raise ValueError("disposition rationale is required")
         finding = self._finding(fingerprint)
-        if finding.severity is Severity.P1:
-            if disposition in {Disposition.REJECT, Disposition.STALE} and not (
-                evidence and evidence.strip()
-            ):
-                raise ValueError("evidence is required to dismiss a P1")
-            if disposition is Disposition.DUPLICATE and not (
-                duplicate_of and duplicate_of.strip()
-            ):
-                raise ValueError("duplicate target is required to dismiss a P1")
+        if disposition is Disposition.DEFERRED_TO_EXISTING_ISSUE and not (
+            deferred_to_issue and deferred_to_issue.strip()
+        ):
+            raise ValueError("existing issue is required to defer a finding")
+        if disposition is Disposition.DUPLICATE and not (
+            duplicate_of and duplicate_of.strip()
+        ):
+            raise ValueError("duplicate target is required to dismiss a finding")
+        if (
+            finding.severity in {Severity.P0, Severity.P1}
+            and disposition in {Disposition.REJECT, Disposition.STALE}
+            and not (evidence and evidence.strip())
+        ):
+            raise ValueError("evidence is required to dismiss a P0/P1")
         if finding.disposition is not disposition:
             finding.verification_passed = False
         finding.disposition = disposition
         finding.rationale = rationale.strip()
-        finding.evidence = evidence.strip() if evidence and evidence.strip() else None
+        if evidence and evidence.strip():
+            finding.evidence = evidence.strip()
         finding.duplicate_of = (
             duplicate_of.strip() if duplicate_of and duplicate_of.strip() else None
+        )
+        finding.deferred_to_issue = (
+            deferred_to_issue.strip()
+            if deferred_to_issue and deferred_to_issue.strip()
+            else None
         )
 
     def record_reproduction(self, *, fingerprint: str, reproduction: str) -> None:
@@ -149,7 +338,13 @@ class ReviewLedger(BaseModel):
 
         if not reproduction.strip():
             raise ValueError("reproduction evidence is required")
-        self._finding(fingerprint).reproduction = reproduction.strip()
+        finding = self._finding(fingerprint)
+        finding.reproduction = reproduction.strip()
+        finding.disposition = None
+        finding.rationale = None
+        finding.verification_passed = False
+        finding.duplicate_of = None
+        finding.deferred_to_issue = None
 
     def record_verification(self, *, fingerprint: str, passed: bool) -> None:
         """Record targeted verification for a current finding."""
