@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-review-coordinator"
-version = "0.1.0"
+version = "0.2.0"
 description = "Provider-neutral coordination and settlement for agentic code review."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -37,4 +37,3 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 88
-

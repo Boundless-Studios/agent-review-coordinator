@@ -290,9 +290,7 @@ class ReviewLedgerTest(unittest.TestCase):
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
         critical = result().model_copy(
             update={
-                "findings": [
-                    finding().model_copy(update={"severity": Severity.P0})
-                ]
+                "findings": [finding().model_copy(update={"severity": Severity.P0})]
             }
         )
         ledger.submit(critical)

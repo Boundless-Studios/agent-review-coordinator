@@ -41,10 +41,30 @@ submit versioned `ReviewResult` documents, record explicit finding dispositions,
 and call `evaluate`. Findings from older heads remain available for audit but do
 not participate in current settlement.
 
-P1 findings always block until fixed and verified or rejected with evidence.
-P2 findings must be evaluated as `fix_now`, `prove_first`, `defer`, `reject`,
-`duplicate`, `stale`, or `wrong_owner`. Review-generation limits never waive a
-known P1, and no disposition creates tracker work.
+The contract has two independent axes:
+
+1. **Review requirements** describe which independent responsibilities must be
+   filled. A requirement has `schema_version`, `slot`, `required`, and an
+   optional `provider_constraint`. Constraints are absent by default; slots are
+   responsibilities, not model identities.
+2. **Finding settlement** describes what happened to each stable finding.
+   Reports normalize outcomes to `fixed`, `declined_with_rationale`,
+   `deferred_to_existing_issue`, or `unresolved`.
+
+P0 and P1 findings block until fixed and verified, identified as duplicates, or
+rejected with evidence. P3 is optional cleanup and does not block. P2 findings
+record supported reachability, impact, observed recurrence, interface/security/
+data-loss/durable-state boundaries, and fix cost. Reachable or meaningful
+findings, recurring failures, boundary risks, and cheap interface defenses
+require a fix or an explicit deferral to existing work. Unsupported,
+unreachable, low-impact findings whose fix requires disproportionate
+architecture may be declined with rationale.
+
+Submitting identical reviewer output is idempotent. It neither consumes another
+stored run nor creates another finding. A severity promotion or changed evidence
+on the exact head reopens that finding; a provider rerun with no new evidence
+does not reset convergence. Review-generation limits never waive a known
+blocking finding, and no disposition creates tracker work.
 
 The CLI exposes the same JSON contract:
 
@@ -53,6 +73,10 @@ agent-review-coordinator slots \
   --policy review-policy.yaml \
   --stage local \
   --round-number 1
+
+agent-review-coordinator requirements \
+  --policy review-policy.yaml \
+  --stage local
 
 agent-review-coordinator submit \
   --ledger review-ledger.json \
@@ -63,8 +87,9 @@ agent-review-coordinator submit \
 agent-review-coordinator disposition \
   --ledger review-ledger.json \
   --fingerprint "$FINGERPRINT" \
-  --disposition defer \
-  --rationale "Unsupported configuration with no observed occurrence."
+  --disposition deferred_to_existing_issue \
+  --rationale "The durable-state redesign already owns this work." \
+  --deferred-to-issue BOU-1234
 
 agent-review-coordinator reproduction \
   --ledger review-ledger.json \

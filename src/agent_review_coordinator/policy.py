@@ -129,9 +129,7 @@ class ReviewPolicy(BaseModel):
         """Return the provider-neutral responsibilities for one stage."""
 
         stage_policy = getattr(self.review, stage.value)
-        required_results = (
-            stage_policy.required_results or stage_policy.reviewer_count
-        )
+        required_results = stage_policy.required_results or stage_policy.reviewer_count
         return [
             ReviewRequirement(
                 slot=f"{stage.value}:{slot_number}",

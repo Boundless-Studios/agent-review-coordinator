@@ -62,12 +62,7 @@ def _missing_for_stage(
     if stage_policy.distinct_executions:
         qualifying_count = min(
             qualifying_count,
-            len(
-                {
-                    result.reviewer_execution_id
-                    for result in results_by_slot.values()
-                }
-            ),
+            len({result.reviewer_execution_id for result in results_by_slot.values()}),
         )
     missing = [
         f"{stage.value}:{slot_number}"
@@ -134,10 +129,7 @@ def _p2_requires_fix(finding: Finding) -> bool:
 
 
 def _finding_state(finding: Finding) -> FindingSettlementState:
-    if (
-        finding.disposition is Disposition.FIXED
-        and finding.verification_passed
-    ):
+    if finding.disposition is Disposition.FIXED and finding.verification_passed:
         return FindingSettlementState.FIXED
     if finding.disposition is Disposition.DEFERRED_TO_EXISTING_ISSUE:
         return FindingSettlementState.DEFERRED_TO_EXISTING_ISSUE

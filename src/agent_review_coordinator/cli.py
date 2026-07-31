@@ -25,8 +25,18 @@ def _parser() -> argparse.ArgumentParser:
 
     slots = subparsers.add_parser("slots")
     slots.add_argument("--policy", type=Path, required=True)
-    slots.add_argument("--stage", choices=[item.value for item in ReviewStage], required=True)
+    slots.add_argument(
+        "--stage", choices=[item.value for item in ReviewStage], required=True
+    )
     slots.add_argument("--round-number", type=int, required=True)
+
+    requirements = subparsers.add_parser("requirements")
+    requirements.add_argument("--policy", type=Path, required=True)
+    requirements.add_argument(
+        "--stage",
+        choices=[item.value for item in ReviewStage],
+        required=True,
+    )
 
     submit = subparsers.add_parser("submit")
     submit.add_argument("--ledger", type=Path, required=True)
@@ -45,6 +55,7 @@ def _parser() -> argparse.ArgumentParser:
     disposition.add_argument("--rationale", required=True)
     disposition.add_argument("--evidence")
     disposition.add_argument("--duplicate-of")
+    disposition.add_argument("--deferred-to-issue")
 
     reproduction = subparsers.add_parser("reproduction")
     reproduction.add_argument("--ledger", type=Path, required=True)
@@ -118,6 +129,18 @@ def _slots(args: argparse.Namespace) -> int:
     return 0
 
 
+def _requirements(args: argparse.Namespace) -> int:
+    policy = _load_policy(args.policy)
+    requirements = policy.requirements_for(stage=ReviewStage(args.stage))
+    _print_json(
+        [
+            requirement.model_dump(mode="json", exclude_none=True)
+            for requirement in requirements
+        ]
+    )
+    return 0
+
+
 def _submit(args: argparse.Namespace) -> int:
     result = ReviewResult.model_validate_json(args.result.read_text(encoding="utf-8"))
     with _ledger_lock(args.ledger):
@@ -144,6 +167,7 @@ def _disposition(args: argparse.Namespace) -> int:
             rationale=args.rationale,
             evidence=args.evidence,
             duplicate_of=args.duplicate_of,
+            deferred_to_issue=args.deferred_to_issue,
         )
         _write_ledger(args.ledger, ledger)
     _print_json(ledger.model_dump(mode="json"))
@@ -175,7 +199,9 @@ def _verification(args: argparse.Namespace) -> int:
 
 
 def _settle(args: argparse.Namespace) -> int:
-    report = evaluate(policy=_load_policy(args.policy), ledger=_load_ledger(args.ledger))
+    report = evaluate(
+        policy=_load_policy(args.policy), ledger=_load_ledger(args.ledger)
+    )
     _print_json(report.model_dump(mode="json"))
     return 0 if report.settled else 10
 
@@ -187,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
         args = _parser().parse_args(argv)
         commands = {
             "slots": _slots,
+            "requirements": _requirements,
             "submit": _submit,
             "disposition": _disposition,
             "reproduction": _reproduction,

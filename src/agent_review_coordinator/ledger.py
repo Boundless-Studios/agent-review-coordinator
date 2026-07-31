@@ -124,9 +124,8 @@ class ReviewLedger(BaseModel):
                 materially_changed = True
             for field_name in ("evidence", "p2_evidence", "reproduction"):
                 submitted_value = getattr(submitted, field_name)
-                if (
-                    submitted_value is not None
-                    and submitted_value != getattr(existing, field_name)
+                if submitted_value is not None and submitted_value != getattr(
+                    existing, field_name
                 ):
                     setattr(existing, field_name, submitted_value)
                     materially_changed = True
