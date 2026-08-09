@@ -154,6 +154,73 @@ class ReviewLedgerTest(unittest.TestCase):
             2,
         )
 
+    def test_reused_round_number_on_descendant_is_one_generation(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 1,
+                        "max_generation_rounds": 2,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        ledger.submit(result(findings=[]))
+        next_head = "d" * 40
+        ledger.advance_head(next_head)
+        ledger.submit(result(head_sha=next_head, findings=[]))
+
+        self.assertEqual(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            2,
+        )
+
+    def test_later_conflicting_retry_cannot_erase_completed_quorum(self) -> None:
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 2,
+                        "required_results": 2,
+                        "distinct_executions": True,
+                        "distinct_providers": True,
+                        "max_generation_rounds": 2,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=CURRENT_HEAD,
+            results=[
+                result(execution_id="execution-a", slot_number=1, findings=[]).model_copy(
+                    update={"reviewer_provider": "provider-a"}
+                ),
+                result(execution_id="execution-b", slot_number=2, findings=[]).model_copy(
+                    update={"reviewer_provider": "provider-b"}
+                ),
+                result(execution_id="execution-a", slot_number=2, findings=[]).model_copy(
+                    update={"reviewer_provider": "provider-a"}
+                ),
+            ],
+        )
+
+        self.assertEqual(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            2,
+        )
+
     def test_delivery_identity_fields_are_required_and_nonempty(self) -> None:
         ledger = ReviewLedger(
             repository=REPOSITORY,

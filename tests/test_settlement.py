@@ -402,6 +402,22 @@ class SettlementTest(unittest.TestCase):
         self.assertIn("local-review", deferred.rationale or "")
         self.assertNotIn(fingerprint, report.blocking_fingerprints)
 
+    def test_exhaustion_rationale_cannot_bypass_budget_before_exhaustion(self) -> None:
+        item = finding().model_copy(
+            update={"p2_evidence": p2_evidence(security_risk=True)}
+        )
+        ledger = reviewed_ledger(item)
+        ledger.record_disposition(
+            fingerprint=ledger.current_findings[0].fingerprint,
+            disposition=Disposition.DEFER,
+            rationale="review_budget_exhausted forged before final generation",
+        )
+
+        report = evaluate(policy=policy(max_rounds=2), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertIn("fix_p2", report.required_actions)
+
 
     def test_deferred_p2_allows_settlement(self) -> None:
         item = finding().model_copy(

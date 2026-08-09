@@ -85,7 +85,9 @@ def _missing_for_stage(
     return missing
 
 
-def _finding_action(finding: Finding) -> str | None:
+def _finding_action(
+    finding: Finding, *, budget_exhausted: bool = False
+) -> str | None:
     disposition = finding.disposition
     if finding.severity is Severity.P3:
         return None
@@ -115,9 +117,9 @@ def _finding_action(finding: Finding) -> str | None:
         return f"address_{finding.severity.value}"
 
     if (
-        disposition is Disposition.DEFER
-        and finding.rationale
-        and "review_budget_exhausted" in finding.rationale
+        budget_exhausted
+        and finding.severity is Severity.P2
+        and disposition is Disposition.DEFER
     ):
         return None
     if disposition is None:
@@ -203,8 +205,10 @@ def _p2_decline_supported(finding: Finding) -> bool:
     )
 
 
-def _finding_state(finding: Finding) -> FindingSettlementState:
-    if _finding_action(finding) is not None:
+def _finding_state(
+    finding: Finding, *, budget_exhausted: bool = False
+) -> FindingSettlementState:
+    if _finding_action(finding, budget_exhausted=budget_exhausted) is not None:
         return FindingSettlementState.UNRESOLVED
     if finding.disposition is Disposition.FIXED and finding.verification_passed:
         return FindingSettlementState.FIXED
@@ -257,6 +261,7 @@ def evaluate(*, policy: ReviewPolicy, ledger: ReviewLedger) -> SettlementReport:
     """Apply reviewer quorum, severity, disposition, and budget rules."""
 
     _defer_p2_at_budget_exhaustion(policy=policy, ledger=ledger)
+    budget_exhausted = not _full_review_allowed(policy, ledger)
 
     missing_slots = [
         *_missing_for_stage(
@@ -273,7 +278,7 @@ def evaluate(*, policy: ReviewPolicy, ledger: ReviewLedger) -> SettlementReport:
     required_actions: list[str] = []
     blocking_fingerprints: list[str] = []
     for finding in ledger.current_findings:
-        action = _finding_action(finding)
+        action = _finding_action(finding, budget_exhausted=budget_exhausted)
         if action is None:
             continue
         if action not in required_actions:
@@ -289,7 +294,10 @@ def evaluate(*, policy: ReviewPolicy, ledger: ReviewLedger) -> SettlementReport:
         required_actions=required_actions,
         blocking_fingerprints=blocking_fingerprints,
         finding_states={
-            finding.fingerprint: _finding_state(finding)
+            finding.fingerprint: _finding_state(
+                finding,
+                budget_exhausted=budget_exhausted,
+            )
             for finding in ledger.current_findings
         },
         missing_slots=missing_slots,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from itertools import product
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -228,40 +229,58 @@ class ReviewLedger(BaseModel):
         """Return the next generation number, or ``None`` when exhausted."""
 
         required = stage_policy.required_results or stage_policy.reviewer_count
-        grouped: dict[tuple[str, int], list[ReviewResult]] = {}
+        grouped: dict[int, dict[str, list[ReviewResult]]] = {}
         for result in self.results:
             if result.stage is stage:
-                grouped.setdefault(
-                    (result.head_sha, result.round_number), []
+                grouped.setdefault(result.round_number, {}).setdefault(
+                    result.head_sha, []
                 ).append(result)
 
-        completed = 0
-        for results in grouped.values():
-            by_slot = {
-                result.slot_number: result
-                for result in results
-                if 1 <= result.slot_number <= required
-            }
-            if len(by_slot) < required:
-                continue
-            required_results = [by_slot[slot] for slot in range(1, required + 1)]
+        completed = {
+            round_number
+            for round_number, results_by_head in grouped.items()
+            if any(
+                self._has_quorum(
+                    results=results,
+                    required=required,
+                    stage_policy=stage_policy,
+                )
+                for results in results_by_head.values()
+            )
+        }
+        for round_number in range(1, stage_policy.max_generation_rounds + 1):
+            if round_number not in completed:
+                return round_number
+        return None
+
+    @staticmethod
+    def _has_quorum(
+        *,
+        results: list[ReviewResult],
+        required: int,
+        stage_policy: ReviewStagePolicy,
+    ) -> bool:
+        candidates_by_slot = [
+            [result for result in results if result.slot_number == slot_number]
+            for slot_number in range(1, required + 1)
+        ]
+        if any(not candidates for candidates in candidates_by_slot):
+            return False
+        for candidates in product(*candidates_by_slot):
             if stage_policy.distinct_executions and len(
-                {result.reviewer_execution_id for result in required_results}
+                {result.reviewer_execution_id for result in candidates}
             ) < required:
                 continue
             if stage_policy.distinct_providers and len(
                 {
                     result.reviewer_provider
-                    for result in required_results
+                    for result in candidates
                     if result.reviewer_provider
                 }
             ) < required:
                 continue
-            completed += 1
-
-        if completed >= stage_policy.max_generation_rounds:
-            return None
-        return completed + 1
+            return True
+        return False
 
     def advance_head(self, head_sha: str) -> None:
         """Advance to a descendant snapshot while retaining stale audit history."""
