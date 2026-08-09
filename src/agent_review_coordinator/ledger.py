@@ -239,11 +239,7 @@ class ReviewLedger(BaseModel):
                 | {
                     "head_sha": head_sha,
                     "fingerprint": "",
-                    "disposition": None,
-                    "rationale": None,
                     "verification_passed": False,
-                    "duplicate_of": None,
-                    "deferred_to_issue": None,
                 }
             )
             for finding in self.findings

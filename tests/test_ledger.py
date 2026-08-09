@@ -88,7 +88,7 @@ class ReviewLedgerTest(unittest.TestCase):
                 review_charter_version="",
             )
 
-    def test_advance_head_carries_findings_and_resets_settlement_state(self) -> None:
+    def test_advance_head_carries_findings_and_resets_verification(self) -> None:
         ledger = ReviewLedger(
             repository=REPOSITORY,
             head_sha=CURRENT_HEAD,
@@ -117,9 +117,15 @@ class ReviewLedgerTest(unittest.TestCase):
         carried = ledger.current_findings[0]
         self.assertEqual(carried.head_sha, next_head)
         self.assertNotEqual(carried.fingerprint, original_fingerprint)
-        self.assertIsNone(carried.disposition)
-        self.assertIsNone(carried.rationale)
-        self.assertIsNone(carried.deferred_to_issue)
+        self.assertEqual(
+            carried.disposition,
+            Disposition.DEFERRED_TO_EXISTING_ISSUE,
+        )
+        self.assertEqual(
+            carried.rationale,
+            "Tracked by the existing delivery issue.",
+        )
+        self.assertEqual(carried.deferred_to_issue, "BOU-1234")
         self.assertIsNone(carried.duplicate_of)
         self.assertFalse(carried.verification_passed)
         self.assertEqual(len(ledger.results), 1)
