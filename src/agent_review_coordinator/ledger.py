@@ -460,6 +460,15 @@ class ReviewLedger(BaseModel):
         ]
         self.architecture_decisions.append(decision.model_copy(deep=True))
 
+    def architecture_core_fix_lineage_ids(self) -> list[str]:
+        """Return lineages explicitly accepted for core replanning."""
+
+        return sorted(
+            item.lineage_id
+            for item in self.architecture_decisions
+            if item.decision is ArchitectureDecisionKind.CORE_FIX_PLANNED
+        )
+
     @staticmethod
     def _quorum_missing(
         *,

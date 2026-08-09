@@ -207,6 +207,20 @@ class SettlementTest(unittest.TestCase):
             "architecture_reevaluation_required", decided.required_actions
         )
 
+        ledger.record_architecture_decision(
+            ArchitectureDecision(
+                repository=REPOSITORY,
+                delivery_id=ledger.delivery_id,
+                review_charter_version=ledger.review_charter_version,
+                lineage_id=first.lineage_id,
+                decision=ArchitectureDecisionKind.CORE_FIX_PLANNED,
+                rationale="Replan the lifecycle boundary as a new delivery.",
+                decided_by="human:owner",
+            )
+        )
+        planned = evaluate(policy=policy(), ledger=ledger)
+        self.assertIn("architecture_core_fix_required", planned.required_actions)
+
     def test_later_retry_cannot_reintroduce_missing_slots_at_exhaustion(self) -> None:
         item = finding().model_copy(
             update={"p2_evidence": p2_evidence(security_risk=True)}

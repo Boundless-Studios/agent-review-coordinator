@@ -243,6 +243,12 @@ def evaluate(*, policy: ReviewPolicy, ledger: ReviewLedger) -> SettlementReport:
     architecture_lineage_ids = ledger.recurring_lineage_ids()
     if architecture_lineage_ids:
         required_actions.append("architecture_reevaluation_required")
+    core_fix_lineage_ids = ledger.architecture_core_fix_lineage_ids()
+    if core_fix_lineage_ids:
+        required_actions.append("architecture_core_fix_required")
+        architecture_lineage_ids = sorted(
+            {*architecture_lineage_ids, *core_fix_lineage_ids}
+        )
 
     allow_targeted = any(
         action in {"fix_p2", "fix_reproduced_p2", "verify_fix"}
