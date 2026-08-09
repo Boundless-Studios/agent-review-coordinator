@@ -227,10 +227,27 @@ class ReviewLedger(BaseModel):
         if head_sha == self.head_sha:
             raise ValueError("new head SHA must differ from current head SHA")
         self.results = [
-            result.model_copy(update={"stale": True}, deep=True)
+            result.model_copy(
+                update={"stale": result.head_sha != head_sha},
+                deep=True,
+            )
             for result in self.results
         ]
-        self.findings = []
+        self.findings = [
+            Finding.model_validate(
+                finding.model_dump()
+                | {
+                    "head_sha": head_sha,
+                    "fingerprint": "",
+                    "disposition": None,
+                    "rationale": None,
+                    "verification_passed": False,
+                    "duplicate_of": None,
+                    "deferred_to_issue": None,
+                }
+            )
+            for finding in self.findings
+        ]
         self.head_sha = head_sha
 
     def submit(self, result: ReviewResult) -> None:

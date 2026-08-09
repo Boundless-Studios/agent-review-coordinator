@@ -88,7 +88,7 @@ class ReviewLedgerTest(unittest.TestCase):
                 review_charter_version="",
             )
 
-    def test_advance_head_retains_results_as_stale_audit_evidence(self) -> None:
+    def test_advance_head_carries_findings_and_resets_settlement_state(self) -> None:
         ledger = ReviewLedger(
             repository=REPOSITORY,
             head_sha=CURRENT_HEAD,
@@ -97,17 +97,48 @@ class ReviewLedgerTest(unittest.TestCase):
         )
         original = result().model_copy(update={"round_number": 2})
         ledger.submit(original)
+        original_fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=original_fingerprint,
+            disposition=Disposition.DEFERRED_TO_EXISTING_ISSUE,
+            rationale="Tracked by the existing delivery issue.",
+            deferred_to_issue="BOU-1234",
+        )
+        ledger.record_verification(
+            fingerprint=original_fingerprint,
+            passed=True,
+        )
         next_head = "c" * 40
 
         ledger.advance_head(next_head)
 
         self.assertEqual(ledger.head_sha, next_head)
-        self.assertEqual(ledger.current_findings, [])
+        self.assertEqual(len(ledger.current_findings), 1)
+        carried = ledger.current_findings[0]
+        self.assertEqual(carried.head_sha, next_head)
+        self.assertNotEqual(carried.fingerprint, original_fingerprint)
+        self.assertIsNone(carried.disposition)
+        self.assertIsNone(carried.rationale)
+        self.assertIsNone(carried.deferred_to_issue)
+        self.assertIsNone(carried.duplicate_of)
+        self.assertFalse(carried.verification_passed)
         self.assertEqual(len(ledger.results), 1)
         self.assertTrue(ledger.results[0].stale)
         self.assertEqual(ledger.results[0].head_sha, CURRENT_HEAD)
         self.assertEqual(ledger.results[0].round_number, 2)
         self.assertFalse(original.stale)
+
+    def test_advance_head_keeps_existing_target_head_result_current(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        next_head = "c" * 40
+        target_result = result(head_sha=next_head)
+        ledger.submit(target_result)
+        self.assertTrue(ledger.results[0].stale)
+
+        ledger.advance_head(next_head)
+
+        self.assertFalse(ledger.results[0].stale)
+        ReviewLedgerModel.model_validate(ledger.model_dump())
 
     def test_new_keyed_evidence_is_retained_and_reopens_finding(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
