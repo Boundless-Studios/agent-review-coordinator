@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -26,6 +27,50 @@ _SEVERITY_RANK = {
 
 # Quorum search is exact within this supported state budget; it never truncates.
 _MAX_QUORUM_SEARCH_STATES = 50_000
+
+
+class HeadAttestationKind(StrEnum):
+    """Why a descendant may reuse completed delivery-wide review quorum."""
+
+    EXHAUSTED_DELIVERY_CONTINUITY = "exhausted_delivery_continuity"
+
+
+class HeadAttestation(BaseModel):
+    """Typed continuity evidence; deliberately not a reviewer result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str = Field(min_length=1)
+    delivery_id: str = Field(min_length=1)
+    review_charter_version: str = Field(min_length=1)
+    reviewed_head_sha: str = Field(min_length=1)
+    head_sha: str = Field(min_length=1)
+    kind: HeadAttestationKind
+    delta_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence: list[str] = Field(min_length=1)
+    attested_by: str = Field(min_length=1)
+
+
+class ArchitectureDecisionKind(StrEnum):
+    """Explicit terminal response to recurring architectural feedback."""
+
+    CORE_FIX_PLANNED = "core_fix_planned"
+    EXPLICITLY_DEFERRED = "explicitly_deferred"
+    REJECTED = "rejected"
+
+
+class ArchitectureDecision(BaseModel):
+    """Human-owned decision that stops automatic work on one lineage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str = Field(min_length=1)
+    delivery_id: str = Field(min_length=1)
+    review_charter_version: str = Field(min_length=1)
+    lineage_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    decision: ArchitectureDecisionKind
+    rationale: str = Field(min_length=1)
+    decided_by: str = Field(min_length=1)
 
 
 def _merge_p2_evidence(
@@ -197,6 +242,8 @@ class ReviewLedger(BaseModel):
     review_charter_version: str = Field(min_length=1)
     results: list[ReviewResult] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
+    head_attestations: list[HeadAttestation] = Field(default_factory=list)
+    architecture_decisions: list[ArchitectureDecision] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_nested_identities(self) -> Self:
@@ -214,6 +261,26 @@ class ReviewLedger(BaseModel):
                 raise ValueError("finding repository does not match ledger")
             if finding.head_sha != self.head_sha:
                 raise ValueError("canonical finding head does not match ledger")
+        for attestation in self.head_attestations:
+            if attestation.repository != self.repository:
+                raise ValueError("attestation repository does not match ledger")
+            if attestation.delivery_id != self.delivery_id:
+                raise ValueError("attestation delivery_id does not match ledger")
+            if attestation.review_charter_version != self.review_charter_version:
+                raise ValueError(
+                    "attestation review_charter_version does not match ledger"
+                )
+            if attestation.head_sha != self.head_sha:
+                raise ValueError("attestation head does not match ledger")
+        for decision in self.architecture_decisions:
+            if decision.repository != self.repository:
+                raise ValueError("architecture decision repository does not match ledger")
+            if decision.delivery_id != self.delivery_id:
+                raise ValueError("architecture decision delivery_id does not match ledger")
+            if decision.review_charter_version != self.review_charter_version:
+                raise ValueError(
+                    "architecture decision review_charter_version does not match ledger"
+                )
         return self
 
     @property
@@ -264,6 +331,10 @@ class ReviewLedger(BaseModel):
     ) -> list[str]:
         """Report current-head quorum gaps using monotonic candidate selection."""
 
+        if stage is ReviewStage.LOCAL and self._has_current_head_attestation(
+            stage_policy=stage_policy
+        ):
+            return []
         results_by_round: dict[int, list[ReviewResult]] = {}
         for result in self.results:
             if not result.stale and result.stage is stage:
@@ -283,6 +354,111 @@ class ReviewLedger(BaseModel):
             required=required,
             stage_policy=stage_policy,
         )
+
+    def _completed_heads(
+        self,
+        *,
+        stage: ReviewStage,
+        stage_policy: ReviewStagePolicy,
+    ) -> set[str]:
+        required = stage_policy.required_results or stage_policy.reviewer_count
+        grouped: dict[tuple[int, str], list[ReviewResult]] = {}
+        for item in self.results:
+            if item.stage is stage:
+                grouped.setdefault((item.round_number, item.head_sha), []).append(item)
+        return {
+            head_sha
+            for (_, head_sha), items in grouped.items()
+            if not self._quorum_missing(
+                stage=stage,
+                results=items,
+                required=required,
+                stage_policy=stage_policy,
+            )
+        }
+
+    def _has_current_head_attestation(
+        self, *, stage_policy: ReviewStagePolicy
+    ) -> bool:
+        completed_heads = self._completed_heads(
+            stage=ReviewStage.LOCAL,
+            stage_policy=stage_policy,
+        )
+        return any(
+            item.head_sha == self.head_sha
+            and item.reviewed_head_sha in completed_heads
+            for item in self.head_attestations
+        )
+
+    def record_head_attestation(
+        self,
+        attestation: HeadAttestation,
+        *,
+        stage_policy: ReviewStagePolicy,
+    ) -> None:
+        """Record descendant continuity without manufacturing a review result."""
+
+        if attestation.repository != self.repository:
+            raise ValueError("attestation repository does not match ledger")
+        if attestation.delivery_id != self.delivery_id:
+            raise ValueError("attestation delivery_id does not match ledger")
+        if attestation.review_charter_version != self.review_charter_version:
+            raise ValueError("attestation review charter does not match ledger")
+        if attestation.head_sha != self.head_sha:
+            raise ValueError("attestation head does not match ledger")
+        if self.next_allowed_round(
+            stage=ReviewStage.LOCAL,
+            stage_policy=stage_policy,
+        ) is not None:
+            raise ValueError("local review budget is not exhausted")
+        if attestation.reviewed_head_sha not in self._completed_heads(
+            stage=ReviewStage.LOCAL,
+            stage_policy=stage_policy,
+        ):
+            raise ValueError("reviewed head does not have completed local quorum")
+        if attestation not in self.head_attestations:
+            self.head_attestations.append(attestation.model_copy(deep=True))
+
+    def recurring_lineage_ids(self) -> list[str]:
+        """Return lineages recurring across generations or three reviewed heads."""
+
+        observations: dict[str, set[tuple[int, str]]] = {}
+        for review_result in self.results:
+            for item in review_result.findings:
+                observations.setdefault(item.lineage_id, set()).add(
+                    (review_result.round_number, review_result.head_sha)
+                )
+        decided = {item.lineage_id for item in self.architecture_decisions}
+        recurring: list[str] = []
+        for lineage_id, seen in observations.items():
+            rounds = {round_number for round_number, _ in seen}
+            heads = {head_sha for _, head_sha in seen}
+            if (len(rounds) >= 2 or len(heads) >= 3) and lineage_id not in decided:
+                recurring.append(lineage_id)
+        return sorted(recurring)
+
+    def record_architecture_decision(self, decision: ArchitectureDecision) -> None:
+        """Record an explicit terminal decision for a recurring lineage."""
+
+        if decision.repository != self.repository:
+            raise ValueError("architecture decision repository does not match ledger")
+        if decision.delivery_id != self.delivery_id:
+            raise ValueError("architecture decision delivery_id does not match ledger")
+        if decision.review_charter_version != self.review_charter_version:
+            raise ValueError("architecture decision review charter does not match ledger")
+        observed = {
+            finding.lineage_id
+            for review_result in self.results
+            for finding in review_result.findings
+        }
+        if decision.lineage_id not in observed:
+            raise ValueError("architecture decision lineage was not observed")
+        self.architecture_decisions = [
+            item
+            for item in self.architecture_decisions
+            if item.lineage_id != decision.lineage_id
+        ]
+        self.architecture_decisions.append(decision.model_copy(deep=True))
 
     @staticmethod
     def _quorum_missing(
@@ -465,6 +641,7 @@ class ReviewLedger(BaseModel):
                 merge_ledger.submit(result)
         self.results = advanced_results
         self.findings = merge_ledger.findings
+        self.head_attestations = []
         self.head_sha = head_sha
 
     def submit(self, result: ReviewResult) -> None:

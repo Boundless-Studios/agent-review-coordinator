@@ -122,6 +122,21 @@ def finding_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def finding_lineage_id(
+    *, repository: str, path: str, invariant: str, title: str
+) -> str:
+    """Return a snapshot-independent identity for a recurring problem."""
+
+    normalized = {
+        "repository": _normalize(repository),
+        "path": _normalize_path(path),
+        "invariant": _normalize(invariant),
+        "title": _normalize(title),
+    }
+    payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class Finding(BaseModel):
     """One provider-neutral finding against an immutable repository snapshot."""
 
@@ -145,6 +160,7 @@ class Finding(BaseModel):
     deferred_to_issue: str | None = None
     contributing_execution_ids: list[str] = Field(default_factory=list)
     fingerprint: str = ""
+    lineage_id: str = ""
     disposition: Disposition | None = None
     rationale: str | None = None
     verification_passed: bool = False
@@ -153,6 +169,7 @@ class Finding(BaseModel):
     def populate_fingerprint(self) -> Self:
         """Calculate the stable fingerprint when an adapter did not supply it."""
 
+        supplied_fingerprint = self.fingerprint
         calculated = finding_fingerprint(
             repository=self.repository,
             head_sha=self.head_sha,
@@ -160,9 +177,18 @@ class Finding(BaseModel):
             invariant=self.invariant,
             title=self.title,
         )
-        if self.fingerprint and self.fingerprint != calculated:
+        if supplied_fingerprint and supplied_fingerprint != calculated:
             raise ValueError("finding fingerprint does not match normalized content")
         self.fingerprint = calculated
+        calculated_lineage = finding_lineage_id(
+            repository=self.repository,
+            path=self.path,
+            invariant=self.invariant,
+            title=self.title,
+        )
+        if supplied_fingerprint and self.lineage_id != calculated_lineage:
+            raise ValueError("finding lineage_id does not match normalized content")
+        self.lineage_id = calculated_lineage
         if not self.contributing_execution_ids:
             self.contributing_execution_ids = [self.reviewer_execution_id]
         elif self.reviewer_execution_id not in self.contributing_execution_ids:

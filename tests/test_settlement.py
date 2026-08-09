@@ -11,8 +11,12 @@ from agent_review_coordinator.findings import (
     Reachability,
     Severity,
 )
-from agent_review_coordinator.ledger import ReviewLedger as ReviewLedgerModel
-from agent_review_coordinator.ledger import ReviewResult
+from agent_review_coordinator.ledger import (
+    ArchitectureDecision,
+    ArchitectureDecisionKind,
+    ReviewLedger as ReviewLedgerModel,
+    ReviewResult,
+)
 from agent_review_coordinator.policy import ReviewPolicy, ReviewStage
 from agent_review_coordinator.settlement import FindingSettlementState, evaluate
 
@@ -146,6 +150,63 @@ def reviewed_ledger(item: Finding, *, round_number: int = 1) -> ReviewLedger:
 
 
 class SettlementTest(unittest.TestCase):
+    def test_recurring_lineage_requires_one_architecture_decision(self) -> None:
+        source = finding().model_dump()
+        first = Finding.model_validate(
+            source | {"head_sha": "a" * 40, "fingerprint": "", "lineage_id": ""}
+        )
+        second = Finding.model_validate(
+            source | {"head_sha": "b" * 40, "fingerprint": "", "lineage_id": ""}
+        )
+        first_result = ReviewResult(
+            repository=REPOSITORY,
+            head_sha=first.head_sha,
+            stage=ReviewStage.LOCAL,
+            round_number=1,
+            slot_number=1,
+            reviewer_execution_id=first.reviewer_execution_id,
+            findings=[first],
+            stale=True,
+        )
+        second_result = ReviewResult(
+            repository=REPOSITORY,
+            head_sha=second.head_sha,
+            stage=ReviewStage.LOCAL,
+            round_number=2,
+            slot_number=1,
+            reviewer_execution_id=second.reviewer_execution_id,
+            findings=[second],
+            stale=True,
+        )
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=HEAD,
+            results=[first_result, second_result],
+        )
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertEqual(
+            report.required_actions, ["architecture_reevaluation_required"]
+        )
+        self.assertEqual(report.architecture_lineage_ids, [first.lineage_id])
+
+        ledger.record_architecture_decision(
+            ArchitectureDecision(
+                repository=REPOSITORY,
+                delivery_id=ledger.delivery_id,
+                review_charter_version=ledger.review_charter_version,
+                lineage_id=first.lineage_id,
+                decision=ArchitectureDecisionKind.EXPLICITLY_DEFERRED,
+                rationale="Bounded review found a core lifecycle redesign; defer it.",
+                decided_by="human:owner",
+            )
+        )
+        decided = evaluate(policy=policy(), ledger=ledger)
+        self.assertNotIn(
+            "architecture_reevaluation_required", decided.required_actions
+        )
+
     def test_later_retry_cannot_reintroduce_missing_slots_at_exhaustion(self) -> None:
         item = finding().model_copy(
             update={"p2_evidence": p2_evidence(security_risk=True)}

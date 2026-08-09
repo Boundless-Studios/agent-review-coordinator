@@ -13,9 +13,14 @@ from agent_review_coordinator.findings import (
     P2Evidence,
     Reachability,
     Severity,
+    finding_lineage_id,
 )
-from agent_review_coordinator.ledger import ReviewLedger as ReviewLedgerModel
-from agent_review_coordinator.ledger import ReviewResult
+from agent_review_coordinator.ledger import (
+    HeadAttestation,
+    HeadAttestationKind,
+    ReviewLedger as ReviewLedgerModel,
+    ReviewResult,
+)
 from agent_review_coordinator.policy import ReviewPolicy, ReviewStage
 from agent_review_coordinator.settlement import evaluate
 
@@ -73,6 +78,121 @@ def result(
 
 
 class ReviewLedgerTest(unittest.TestCase):
+    def test_finding_lineage_is_stable_across_heads(self) -> None:
+        original = finding(head_sha=CURRENT_HEAD)
+        descendant = finding(head_sha="c" * 40)
+
+        self.assertNotEqual(original.fingerprint, descendant.fingerprint)
+        self.assertEqual(original.lineage_id, descendant.lineage_id)
+        self.assertEqual(
+            original.lineage_id,
+            finding_lineage_id(
+                repository=REPOSITORY,
+                path=original.path,
+                invariant=original.invariant,
+                title=original.title,
+            ),
+        )
+
+    def test_exhausted_descendant_attestation_satisfies_local_quorum(self) -> None:
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 1,
+                        "required_results": 1,
+                        "max_generation_rounds": 2,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        ledger.submit(result(round_number=1, findings=[]))
+        reviewed_head = "c" * 40
+        ledger.advance_head(reviewed_head)
+        ledger.submit(
+            result(head_sha=reviewed_head, round_number=2, findings=[])
+        )
+        descendant_head = "d" * 40
+        ledger.advance_head(descendant_head)
+
+        self.assertIsNone(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            )
+        )
+        self.assertEqual(
+            ledger.missing_slots_for_stage(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            ["local:1"],
+        )
+        result_count = len(ledger.results)
+        ledger.record_head_attestation(
+            HeadAttestation(
+                repository=REPOSITORY,
+                delivery_id=DELIVERY_ID,
+                review_charter_version=REVIEW_CHARTER_VERSION,
+                reviewed_head_sha=reviewed_head,
+                head_sha=descendant_head,
+                kind=HeadAttestationKind.EXHAUSTED_DELIVERY_CONTINUITY,
+                delta_sha256="a" * 64,
+                evidence=["unit:test_exhausted_descendant_attestation"],
+                attested_by="gaia-review-local",
+            ),
+            stage_policy=stage_policy,
+        )
+
+        self.assertEqual(len(ledger.results), result_count)
+        self.assertIsNone(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            )
+        )
+        self.assertEqual(
+            ledger.missing_slots_for_stage(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            [],
+        )
+
+    def test_attestation_rejects_head_without_completed_local_quorum(self) -> None:
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 1,
+                        "max_generation_rounds": 1,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+
+        with self.assertRaisesRegex(ValueError, "local review budget is not exhausted"):
+            ledger.record_head_attestation(
+                HeadAttestation(
+                    repository=REPOSITORY,
+                    delivery_id=DELIVERY_ID,
+                    review_charter_version=REVIEW_CHARTER_VERSION,
+                    reviewed_head_sha="c" * 40,
+                    head_sha=CURRENT_HEAD,
+                    kind=HeadAttestationKind.EXHAUSTED_DELIVERY_CONTINUITY,
+                    delta_sha256="a" * 64,
+                    evidence=["unit:unknown-head"],
+                    attested_by="gaia-review-local",
+                ),
+                stage_policy=stage_policy,
+            )
+
     def test_protocol_v1_ledger_is_rejected(self) -> None:
         with self.assertRaises(ValidationError):
             ReviewLedgerModel.model_validate(

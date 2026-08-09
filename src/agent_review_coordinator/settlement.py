@@ -40,6 +40,7 @@ class SettlementReport(BaseModel):
     missing_slots: list[str] = Field(default_factory=list)
     allow_full_review: bool
     allow_targeted_verification: bool
+    architecture_lineage_ids: list[str] = Field(default_factory=list)
 
 
 def _finding_action(
@@ -239,6 +240,9 @@ def evaluate(*, policy: ReviewPolicy, ledger: ReviewLedger) -> SettlementReport:
         if action not in required_actions:
             required_actions.append(action)
         blocking_fingerprints.append(finding.fingerprint)
+    architecture_lineage_ids = ledger.recurring_lineage_ids()
+    if architecture_lineage_ids:
+        required_actions.append("architecture_reevaluation_required")
 
     allow_targeted = any(
         action in {"fix_p2", "fix_reproduced_p2", "verify_fix"}
@@ -258,4 +262,5 @@ def evaluate(*, policy: ReviewPolicy, ledger: ReviewLedger) -> SettlementReport:
         missing_slots=missing_slots,
         allow_full_review=_full_review_allowed(policy, ledger),
         allow_targeted_verification=allow_targeted,
+        architecture_lineage_ids=architecture_lineage_ids,
     )
