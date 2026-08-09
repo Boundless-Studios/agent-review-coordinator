@@ -11,12 +11,20 @@ from agent_review_coordinator.findings import (
     Reachability,
     Severity,
 )
-from agent_review_coordinator.ledger import ReviewLedger, ReviewResult
+from agent_review_coordinator.ledger import ReviewLedger as ReviewLedgerModel
+from agent_review_coordinator.ledger import ReviewResult
 from agent_review_coordinator.policy import ReviewPolicy, ReviewStage
 from agent_review_coordinator.settlement import FindingSettlementState, evaluate
 
 REPOSITORY = "Boundless-Studios/gaia-free"
 HEAD = "c" * 40
+
+
+class ReviewLedger(ReviewLedgerModel):
+    """Ledger fixture carrying the required delivery identity."""
+
+    delivery_id: str = "repo:branch:base"
+    review_charter_version: str = "gaia-v1"
 
 
 def policy(

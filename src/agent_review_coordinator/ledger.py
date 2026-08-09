@@ -190,6 +190,8 @@ class ReviewLedger(BaseModel):
     version: Literal[1] = 1
     repository: str = Field(min_length=1)
     head_sha: str = Field(min_length=1)
+    delivery_id: str = Field(min_length=1)
+    review_charter_version: str = Field(min_length=1)
     results: list[ReviewResult] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
 
@@ -216,6 +218,20 @@ class ReviewLedger(BaseModel):
         """Canonical, deduplicated findings for the ledger's current head."""
 
         return self.findings
+
+    def advance_head(self, head_sha: str) -> None:
+        """Advance to a descendant snapshot while retaining stale audit history."""
+
+        if not head_sha:
+            raise ValueError("head SHA is required")
+        if head_sha == self.head_sha:
+            raise ValueError("new head SHA must differ from current head SHA")
+        self.results = [
+            result.model_copy(update={"stale": True}, deep=True)
+            for result in self.results
+        ]
+        self.findings = []
+        self.head_sha = head_sha
 
     def submit(self, result: ReviewResult) -> None:
         """Record one valid result and merge its current findings."""

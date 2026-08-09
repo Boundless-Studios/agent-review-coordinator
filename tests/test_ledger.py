@@ -1,5 +1,7 @@
 import unittest
 
+from pydantic import ValidationError
+
 from agent_review_coordinator.findings import (
     Disposition,
     EvidenceArtifact,
@@ -11,11 +13,21 @@ from agent_review_coordinator.findings import (
     Reachability,
     Severity,
 )
-from agent_review_coordinator.ledger import ReviewLedger, ReviewResult
+from agent_review_coordinator.ledger import ReviewLedger as ReviewLedgerModel
+from agent_review_coordinator.ledger import ReviewResult
 from agent_review_coordinator.policy import ReviewStage
 
 REPOSITORY = "Boundless-Studios/gaia-free"
 CURRENT_HEAD = "b" * 40
+DELIVERY_ID = "repo:branch:base"
+REVIEW_CHARTER_VERSION = "gaia-v1"
+
+
+class ReviewLedger(ReviewLedgerModel):
+    """Ledger fixture carrying the required delivery identity."""
+
+    delivery_id: str = DELIVERY_ID
+    review_charter_version: str = REVIEW_CHARTER_VERSION
 
 
 def finding(
@@ -52,6 +64,51 @@ def result(
 
 
 class ReviewLedgerTest(unittest.TestCase):
+    def test_delivery_identity_fields_are_required_and_nonempty(self) -> None:
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=CURRENT_HEAD,
+            delivery_id=DELIVERY_ID,
+            review_charter_version=REVIEW_CHARTER_VERSION,
+        )
+        self.assertEqual(ledger.delivery_id, DELIVERY_ID)
+        self.assertEqual(ledger.review_charter_version, REVIEW_CHARTER_VERSION)
+        with self.assertRaises(ValidationError):
+            ReviewLedgerModel(
+                repository=REPOSITORY,
+                head_sha=CURRENT_HEAD,
+                delivery_id="",
+                review_charter_version=REVIEW_CHARTER_VERSION,
+            )
+        with self.assertRaises(ValidationError):
+            ReviewLedgerModel(
+                repository=REPOSITORY,
+                head_sha=CURRENT_HEAD,
+                delivery_id=DELIVERY_ID,
+                review_charter_version="",
+            )
+
+    def test_advance_head_retains_results_as_stale_audit_evidence(self) -> None:
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=CURRENT_HEAD,
+            delivery_id=DELIVERY_ID,
+            review_charter_version=REVIEW_CHARTER_VERSION,
+        )
+        original = result().model_copy(update={"round_number": 2})
+        ledger.submit(original)
+        next_head = "c" * 40
+
+        ledger.advance_head(next_head)
+
+        self.assertEqual(ledger.head_sha, next_head)
+        self.assertEqual(ledger.current_findings, [])
+        self.assertEqual(len(ledger.results), 1)
+        self.assertTrue(ledger.results[0].stale)
+        self.assertEqual(ledger.results[0].head_sha, CURRENT_HEAD)
+        self.assertEqual(ledger.results[0].round_number, 2)
+        self.assertFalse(original.stale)
+
     def test_new_keyed_evidence_is_retained_and_reopens_finding(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
         first_artifact = EvidenceArtifact(

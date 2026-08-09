@@ -42,6 +42,8 @@ def _parser() -> argparse.ArgumentParser:
     submit.add_argument("--ledger", type=Path, required=True)
     submit.add_argument("--repository", required=True)
     submit.add_argument("--head-sha", required=True)
+    submit.add_argument("--delivery-id", required=True)
+    submit.add_argument("--review-charter-version", required=True)
     submit.add_argument("--result", type=Path, required=True)
 
     disposition = subparsers.add_parser("disposition")
@@ -146,12 +148,23 @@ def _submit(args: argparse.Namespace) -> int:
     with _ledger_lock(args.ledger):
         if args.ledger.exists():
             ledger = _load_ledger(args.ledger)
-            if ledger.repository != args.repository or ledger.head_sha != args.head_sha:
+            if (
+                ledger.repository != args.repository
+                or ledger.head_sha != args.head_sha
+                or ledger.delivery_id != args.delivery_id
+                or ledger.review_charter_version != args.review_charter_version
+            ):
                 raise ValueError(
-                    "ledger identity does not match repository and head SHA"
+                    "ledger identity does not match repository, head SHA, delivery ID, "
+                    "and review charter version"
                 )
         else:
-            ledger = ReviewLedger(repository=args.repository, head_sha=args.head_sha)
+            ledger = ReviewLedger(
+                repository=args.repository,
+                head_sha=args.head_sha,
+                delivery_id=args.delivery_id,
+                review_charter_version=args.review_charter_version,
+            )
         ledger.submit(result)
         _write_ledger(args.ledger, ledger)
     _print_json(ledger.model_dump(mode="json"))
