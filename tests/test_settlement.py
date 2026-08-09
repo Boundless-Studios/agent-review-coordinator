@@ -14,9 +14,9 @@ from agent_review_coordinator.findings import (
 from agent_review_coordinator.ledger import (
     ArchitectureDecision,
     ArchitectureDecisionKind,
-    ReviewLedger as ReviewLedgerModel,
     ReviewResult,
 )
+from agent_review_coordinator.ledger import ReviewLedger as ReviewLedgerModel
 from agent_review_coordinator.policy import ReviewPolicy, ReviewStage
 from agent_review_coordinator.settlement import FindingSettlementState, evaluate
 

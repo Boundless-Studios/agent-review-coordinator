@@ -33,9 +33,9 @@ from .settlement import FindingSettlementState, SettlementReport, evaluate
 __version__ = "0.4.0"
 
 __all__ = [
-    "Disposition",
     "ArchitectureDecision",
     "ArchitectureDecisionKind",
+    "Disposition",
     "EvidenceArtifact",
     "EvidenceKind",
     "Finding",
