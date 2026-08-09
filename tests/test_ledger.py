@@ -15,7 +15,8 @@ from agent_review_coordinator.findings import (
 )
 from agent_review_coordinator.ledger import ReviewLedger as ReviewLedgerModel
 from agent_review_coordinator.ledger import ReviewResult
-from agent_review_coordinator.policy import ReviewStage
+from agent_review_coordinator.policy import ReviewPolicy, ReviewStage
+from agent_review_coordinator.settlement import evaluate
 
 REPOSITORY = "Boundless-Studios/gaia-free"
 CURRENT_HEAD = "b" * 40
@@ -145,6 +146,45 @@ class ReviewLedgerTest(unittest.TestCase):
 
         self.assertFalse(ledger.results[0].stale)
         ReviewLedgerModel.model_validate(ledger.model_dump())
+
+    def test_advance_head_canonicalizes_activated_target_findings(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        next_head = "c" * 40
+        blocking = finding(head_sha=next_head).model_copy(
+            update={"severity": Severity.P1}
+        )
+        target_result = result(head_sha=next_head).model_copy(
+            update={"findings": [blocking]}
+        )
+        ledger.submit(target_result)
+
+        ledger.advance_head(next_head)
+
+        self.assertEqual(len(ledger.results), 1)
+        self.assertFalse(ledger.results[0].stale)
+        self.assertEqual(ledger.current_findings, [blocking])
+        report = evaluate(
+            policy=ReviewPolicy.model_validate(
+                {
+                    "version": 1,
+                    "review": {
+                        "local": {
+                            "reviewer_count": 1,
+                            "required_results": 1,
+                            "max_generation_rounds": 2,
+                        },
+                        "backstop": {
+                            "reviewer_count": 1,
+                            "required_results": 1,
+                            "trigger": "new_head_sha",
+                        },
+                    },
+                }
+            ),
+            ledger=ledger,
+        )
+        self.assertIn("address_p1", report.required_actions)
+        self.assertIn(blocking.fingerprint, report.blocking_fingerprints)
 
     def test_new_keyed_evidence_is_retained_and_reopens_finding(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)

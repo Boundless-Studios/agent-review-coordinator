@@ -226,14 +226,14 @@ class ReviewLedger(BaseModel):
             raise ValueError("head SHA is required")
         if head_sha == self.head_sha:
             raise ValueError("new head SHA must differ from current head SHA")
-        self.results = [
+        advanced_results = [
             result.model_copy(
                 update={"stale": result.head_sha != head_sha},
                 deep=True,
             )
             for result in self.results
         ]
-        self.findings = [
+        advanced_findings = [
             Finding.model_validate(
                 finding.model_dump()
                 | {
@@ -244,6 +244,18 @@ class ReviewLedger(BaseModel):
             )
             for finding in self.findings
         ]
+        merge_ledger = ReviewLedger(
+            repository=self.repository,
+            head_sha=head_sha,
+            delivery_id=self.delivery_id,
+            review_charter_version=self.review_charter_version,
+            findings=advanced_findings,
+        )
+        for result in advanced_results:
+            if not result.stale:
+                merge_ledger.submit(result)
+        self.results = advanced_results
+        self.findings = merge_ledger.findings
         self.head_sha = head_sha
 
     def submit(self, result: ReviewResult) -> None:
