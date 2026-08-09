@@ -240,7 +240,8 @@ class ReviewLedger(BaseModel):
             round_number
             for round_number, results_by_head in grouped.items()
             if any(
-                self._has_quorum(
+                not self._quorum_missing(
+                    stage=stage,
                     results=results,
                     required=required,
                     stage_policy=stage_policy,
@@ -253,34 +254,92 @@ class ReviewLedger(BaseModel):
                 return round_number
         return None
 
-    @staticmethod
-    def _has_quorum(
+    def missing_slots_for_stage(
+        self,
         *,
+        stage: ReviewStage,
+        stage_policy: ReviewStagePolicy,
+    ) -> list[str]:
+        """Report current-head quorum gaps using monotonic candidate selection."""
+
+        results_by_round: dict[int, list[ReviewResult]] = {}
+        for result in self.results:
+            if not result.stale and result.stage is stage:
+                results_by_round.setdefault(result.round_number, []).append(result)
+        required = stage_policy.required_results or stage_policy.reviewer_count
+        if results_by_round:
+            current_round = max(results_by_round)
+            return self._quorum_missing(
+                stage=stage,
+                results=results_by_round[current_round],
+                required=required,
+                stage_policy=stage_policy,
+            )
+        return self._quorum_missing(
+            stage=stage,
+            results=[],
+            required=required,
+            stage_policy=stage_policy,
+        )
+
+    @staticmethod
+    def _quorum_missing(
+        *,
+        stage: ReviewStage,
         results: list[ReviewResult],
         required: int,
         stage_policy: ReviewStagePolicy,
-    ) -> bool:
+    ) -> list[str]:
         candidates_by_slot = [
             [result for result in results if result.slot_number == slot_number]
             for slot_number in range(1, required + 1)
         ]
-        if any(not candidates for candidates in candidates_by_slot):
-            return False
+        missing = [
+            f"{stage.value}:{slot_number}"
+            for slot_number, candidates in enumerate(candidates_by_slot, start=1)
+            if not candidates
+        ]
+        if missing:
+            if stage_policy.distinct_providers:
+                providers = {
+                    result.reviewer_provider
+                    for candidates in candidates_by_slot
+                    for result in candidates
+                    if result.reviewer_provider
+                }
+                if len(providers) < required:
+                    missing.append(f"{stage.value}:provider-diversity")
+            return missing
+        execution_possible = not stage_policy.distinct_executions
+        provider_possible = not stage_policy.distinct_providers
         for candidates in product(*candidates_by_slot):
-            if stage_policy.distinct_executions and len(
+            execution_valid = len(
                 {result.reviewer_execution_id for result in candidates}
-            ) < required:
-                continue
-            if stage_policy.distinct_providers and len(
+            ) >= required
+            provider_valid = len(
                 {
                     result.reviewer_provider
                     for result in candidates
                     if result.reviewer_provider
                 }
-            ) < required:
-                continue
-            return True
-        return False
+            ) >= required
+            execution_possible = execution_possible or execution_valid
+            provider_possible = provider_possible or provider_valid
+            if (
+                (not stage_policy.distinct_executions or execution_valid)
+                and (not stage_policy.distinct_providers or provider_valid)
+            ):
+                return []
+        missing = []
+        if stage_policy.distinct_executions and not execution_possible:
+            missing.append(f"{stage.value}:{required}")
+        if stage_policy.distinct_providers and not provider_possible:
+            missing.append(f"{stage.value}:provider-diversity")
+        if not missing:
+            missing.extend(
+                [f"{stage.value}:{required}", f"{stage.value}:provider-diversity"]
+            )
+        return missing
 
     def advance_head(self, head_sha: str) -> None:
         """Advance to a descendant snapshot while retaining stale audit history."""

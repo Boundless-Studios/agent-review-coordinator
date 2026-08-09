@@ -98,6 +98,7 @@ def result(
     findings: list[Finding] | None = None,
     execution_id: str | None = None,
     provider: str | None = None,
+    slot_number: int = 1,
 ) -> ReviewResult:
     identifier = execution_id or f"{stage.value}-review"
     normalized = [
@@ -115,7 +116,7 @@ def result(
         head_sha=HEAD,
         stage=stage,
         round_number=round_number,
-        slot_number=1,
+        slot_number=slot_number,
         reviewer_execution_id=identifier,
         reviewer_provider=provider,
         findings=normalized,
@@ -145,6 +146,57 @@ def reviewed_ledger(item: Finding, *, round_number: int = 1) -> ReviewLedger:
 
 
 class SettlementTest(unittest.TestCase):
+    def test_later_retry_cannot_reintroduce_missing_slots_at_exhaustion(self) -> None:
+        item = finding().model_copy(
+            update={"p2_evidence": p2_evidence(security_risk=True)}
+        )
+        local_a = result(
+            stage=ReviewStage.LOCAL,
+            findings=[item],
+            execution_id="execution-a",
+            provider="provider-a",
+            slot_number=1,
+        )
+        local_b = result(
+            stage=ReviewStage.LOCAL,
+            execution_id="execution-b",
+            provider="provider-b",
+            slot_number=2,
+        )
+        conflicting_retry = result(
+            stage=ReviewStage.LOCAL,
+            execution_id="execution-a",
+            provider="provider-a",
+            slot_number=2,
+        )
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=HEAD,
+            results=[
+                local_a,
+                local_b,
+                conflicting_retry,
+                result(stage=ReviewStage.BACKSTOP),
+            ],
+            findings=[local_a.findings[0]],
+        )
+
+        report = evaluate(
+            policy=policy(
+                max_rounds=1,
+                reviewer_count=2,
+                distinct_providers=True,
+            ),
+            ledger=ledger,
+        )
+
+        self.assertEqual(report.missing_slots, [])
+        self.assertTrue(report.settled)
+        self.assertEqual(
+            ledger.current_findings[0].disposition,
+            Disposition.DEFER,
+        )
+
     def test_p0_blocks_like_p1(self) -> None:
         report = evaluate(
             policy=policy(),

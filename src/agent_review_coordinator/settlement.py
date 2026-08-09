@@ -16,7 +16,7 @@ from .findings import (
     Severity,
 )
 from .ledger import ReviewLedger
-from .policy import ReviewPolicy, ReviewStage, ReviewStagePolicy
+from .policy import ReviewPolicy, ReviewStage
 
 
 class FindingSettlementState(StrEnum):
@@ -40,49 +40,6 @@ class SettlementReport(BaseModel):
     missing_slots: list[str] = Field(default_factory=list)
     allow_full_review: bool
     allow_targeted_verification: bool
-
-
-def _missing_for_stage(
-    *,
-    stage: ReviewStage,
-    stage_policy: ReviewStagePolicy,
-    ledger: ReviewLedger,
-) -> list[str]:
-    results = [
-        result
-        for result in ledger.results
-        if not result.stale and result.stage is stage
-    ]
-    required = stage_policy.required_results or stage_policy.reviewer_count
-    results_by_slot = {
-        result.slot_number: result
-        for result in results
-        if 1 <= result.slot_number <= stage_policy.reviewer_count
-    }
-    missing: list[str] = []
-    seen_executions: set[str] = set()
-    for slot_number in range(1, required + 1):
-        result = results_by_slot.get(slot_number)
-        if result is None:
-            missing.append(f"{stage.value}:{slot_number}")
-            continue
-        if (
-            stage_policy.distinct_executions
-            and result.reviewer_execution_id in seen_executions
-        ):
-            missing.append(f"{stage.value}:{slot_number}")
-            continue
-        seen_executions.add(result.reviewer_execution_id)
-    if stage_policy.distinct_providers:
-        providers = {
-            results_by_slot[slot_number].reviewer_provider
-            for slot_number in range(1, required + 1)
-            if slot_number in results_by_slot
-            and results_by_slot[slot_number].reviewer_provider
-        }
-        if len(providers) < required:
-            missing.append(f"{stage.value}:provider-diversity")
-    return missing
 
 
 def _finding_action(
@@ -264,15 +221,13 @@ def evaluate(*, policy: ReviewPolicy, ledger: ReviewLedger) -> SettlementReport:
     budget_exhausted = not _full_review_allowed(policy, ledger)
 
     missing_slots = [
-        *_missing_for_stage(
+        *ledger.missing_slots_for_stage(
             stage=ReviewStage.LOCAL,
             stage_policy=policy.review.local,
-            ledger=ledger,
         ),
-        *_missing_for_stage(
+        *ledger.missing_slots_for_stage(
             stage=ReviewStage.BACKSTOP,
             stage_policy=policy.review.backstop,
-            ledger=ledger,
         ),
     ]
     required_actions: list[str] = []
