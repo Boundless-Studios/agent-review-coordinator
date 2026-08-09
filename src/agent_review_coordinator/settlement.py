@@ -250,7 +250,8 @@ def evaluate(*, policy: ReviewPolicy, ledger: ReviewLedger) -> SettlementReport:
             {*architecture_lineage_ids, *core_fix_lineage_ids}
         )
 
-    allow_targeted = any(
+    architecture_blocks_automation = bool(architecture_lineage_ids)
+    allow_targeted = not architecture_blocks_automation and any(
         action in {"fix_p2", "fix_reproduced_p2", "verify_fix"}
         for action in required_actions
     )
@@ -266,7 +267,9 @@ def evaluate(*, policy: ReviewPolicy, ledger: ReviewLedger) -> SettlementReport:
             for finding in ledger.current_findings
         },
         missing_slots=missing_slots,
-        allow_full_review=_full_review_allowed(policy, ledger),
+        allow_full_review=(
+            not architecture_blocks_automation and _full_review_allowed(policy, ledger)
+        ),
         allow_targeted_verification=allow_targeted,
         architecture_lineage_ids=architecture_lineage_ids,
     )

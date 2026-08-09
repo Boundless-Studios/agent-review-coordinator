@@ -50,6 +50,16 @@ class HeadAttestation(BaseModel):
     evidence: list[str] = Field(min_length=1)
     attested_by: str = Field(min_length=1)
 
+    @model_validator(mode="after")
+    def validate_substantive_provenance(self) -> Self:
+        """Reject continuity claims without concrete evidence and attribution."""
+
+        if any(not item.strip() for item in self.evidence):
+            raise ValueError("attestation evidence entries must be nonblank")
+        if not self.attested_by.strip():
+            raise ValueError("attestation actor must be nonblank")
+        return self
+
 
 class ArchitectureDecisionKind(StrEnum):
     """Explicit terminal response to recurring architectural feedback."""
@@ -71,6 +81,16 @@ class ArchitectureDecision(BaseModel):
     decision: ArchitectureDecisionKind
     rationale: str = Field(min_length=1)
     decided_by: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_substantive_metadata(self) -> Self:
+        """Require an auditable actor and rationale."""
+
+        if not self.rationale.strip():
+            raise ValueError("architecture decision rationale must be nonblank")
+        if not self.decided_by.strip():
+            raise ValueError("architecture decision actor must be nonblank")
+        return self
 
 
 def _merge_p2_evidence(
@@ -270,8 +290,6 @@ class ReviewLedger(BaseModel):
                 raise ValueError(
                     "attestation review_charter_version does not match ledger"
                 )
-            if attestation.head_sha != self.head_sha:
-                raise ValueError("attestation head does not match ledger")
         for decision in self.architecture_decisions:
             if decision.repository != self.repository:
                 raise ValueError("architecture decision repository does not match ledger")
@@ -281,6 +299,8 @@ class ReviewLedger(BaseModel):
                 raise ValueError(
                     "architecture decision review_charter_version does not match ledger"
                 )
+            if decision.lineage_id not in self._recurring_lineage_ids():
+                raise ValueError("architecture decision lineage is not recurring")
         return self
 
     @property
@@ -380,6 +400,11 @@ class ReviewLedger(BaseModel):
     def _has_current_head_attestation(
         self, *, stage_policy: ReviewStagePolicy
     ) -> bool:
+        if self.next_allowed_round(
+            stage=ReviewStage.LOCAL,
+            stage_policy=stage_policy,
+        ) is not None:
+            return False
         completed_heads = self._completed_heads(
             stage=ReviewStage.LOCAL,
             stage_policy=stage_policy,
@@ -419,23 +444,34 @@ class ReviewLedger(BaseModel):
         if attestation not in self.head_attestations:
             self.head_attestations.append(attestation.model_copy(deep=True))
 
-    def recurring_lineage_ids(self) -> list[str]:
-        """Return lineages recurring across generations or three reviewed heads."""
+    def _recurring_lineage_ids(self) -> set[str]:
+        """Derive recurrence before applying recorded architecture decisions."""
 
-        observations: dict[str, set[tuple[int, str]]] = {}
+        local_rounds: dict[str, set[int]] = {}
+        reviewed_heads: dict[str, set[str]] = {}
         for review_result in self.results:
             for item in review_result.findings:
-                observations.setdefault(item.lineage_id, set()).add(
-                    (review_result.round_number, review_result.head_sha)
+                if item.severity is Severity.P3:
+                    continue
+                reviewed_heads.setdefault(item.lineage_id, set()).add(
+                    review_result.head_sha
                 )
+                if review_result.stage is ReviewStage.LOCAL:
+                    local_rounds.setdefault(item.lineage_id, set()).add(
+                        review_result.round_number
+                    )
+        return {
+            lineage_id
+            for lineage_id in reviewed_heads
+            if len(local_rounds.get(lineage_id, set())) >= 2
+            or len(reviewed_heads[lineage_id]) >= 3
+        }
+
+    def recurring_lineage_ids(self) -> list[str]:
+        """Return undecided lineages requiring architecture reevaluation."""
+
         decided = {item.lineage_id for item in self.architecture_decisions}
-        recurring: list[str] = []
-        for lineage_id, seen in observations.items():
-            rounds = {round_number for round_number, _ in seen}
-            heads = {head_sha for _, head_sha in seen}
-            if (len(rounds) >= 2 or len(heads) >= 3) and lineage_id not in decided:
-                recurring.append(lineage_id)
-        return sorted(recurring)
+        return sorted(self._recurring_lineage_ids() - decided)
 
     def record_architecture_decision(self, decision: ArchitectureDecision) -> None:
         """Record an explicit terminal decision for a recurring lineage."""
@@ -446,13 +482,8 @@ class ReviewLedger(BaseModel):
             raise ValueError("architecture decision delivery_id does not match ledger")
         if decision.review_charter_version != self.review_charter_version:
             raise ValueError("architecture decision review charter does not match ledger")
-        observed = {
-            finding.lineage_id
-            for review_result in self.results
-            for finding in review_result.findings
-        }
-        if decision.lineage_id not in observed:
-            raise ValueError("architecture decision lineage was not observed")
+        if decision.lineage_id not in self._recurring_lineage_ids():
+            raise ValueError("architecture decision lineage is not recurring")
         self.architecture_decisions = [
             item
             for item in self.architecture_decisions
@@ -650,7 +681,6 @@ class ReviewLedger(BaseModel):
                 merge_ledger.submit(result)
         self.results = advanced_results
         self.findings = merge_ledger.findings
-        self.head_attestations = []
         self.head_sha = head_sha
 
     def submit(self, result: ReviewResult) -> None:

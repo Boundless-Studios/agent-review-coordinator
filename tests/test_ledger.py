@@ -16,6 +16,8 @@ from agent_review_coordinator.findings import (
     finding_lineage_id,
 )
 from agent_review_coordinator.ledger import (
+    ArchitectureDecision,
+    ArchitectureDecisionKind,
     HeadAttestation,
     HeadAttestationKind,
     ReviewResult,
@@ -78,6 +80,44 @@ def result(
 
 
 class ReviewLedgerTest(unittest.TestCase):
+    def test_protocol_v2_finding_without_lineage_id_derives_it_on_load(self) -> None:
+        persisted = finding().model_dump()
+        persisted.pop("lineage_id")
+
+        restored = Finding.model_validate(persisted)
+
+        self.assertEqual(restored.lineage_id, finding().lineage_id)
+
+    def test_attestation_metadata_rejects_blank_values(self) -> None:
+        values = {
+            "repository": REPOSITORY,
+            "delivery_id": DELIVERY_ID,
+            "review_charter_version": REVIEW_CHARTER_VERSION,
+            "reviewed_head_sha": "c" * 40,
+            "head_sha": CURRENT_HEAD,
+            "kind": HeadAttestationKind.EXHAUSTED_DELIVERY_CONTINUITY,
+            "delta_sha256": "a" * 64,
+            "evidence": ["unit:continuity"],
+            "attested_by": "gaia-review-local",
+        }
+        for update in ({"evidence": [" "]}, {"attested_by": " "}):
+            with self.subTest(update=update), self.assertRaises(ValidationError):
+                HeadAttestation.model_validate(values | update)
+
+    def test_architecture_decision_metadata_rejects_blank_values(self) -> None:
+        values = {
+            "repository": REPOSITORY,
+            "delivery_id": DELIVERY_ID,
+            "review_charter_version": REVIEW_CHARTER_VERSION,
+            "lineage_id": finding().lineage_id,
+            "decision": ArchitectureDecisionKind.EXPLICITLY_DEFERRED,
+            "rationale": "Defer the lifecycle redesign.",
+            "decided_by": "human:owner",
+        }
+        for update in ({"rationale": " "}, {"decided_by": " "}):
+            with self.subTest(update=update), self.assertRaises(ValidationError):
+                ArchitectureDecision.model_validate(values | update)
+
     def test_finding_lineage_is_stable_across_heads(self) -> None:
         original = finding(head_sha=CURRENT_HEAD)
         descendant = finding(head_sha="c" * 40)
@@ -161,6 +201,84 @@ class ReviewLedgerTest(unittest.TestCase):
             ),
             [],
         )
+
+    def test_loaded_attestation_does_not_bypass_a_larger_generation_budget(self) -> None:
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 1,
+                        "max_generation_rounds": 3,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        first_head = "a" * 40
+        reviewed_head = "b" * 40
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=first_head)
+        ledger.submit(result(head_sha=first_head, round_number=1, findings=[]))
+        ledger.advance_head(reviewed_head)
+        ledger.submit(result(head_sha=reviewed_head, round_number=2, findings=[]))
+        descendant_head = "d" * 40
+        ledger.advance_head(descendant_head)
+        ledger.head_attestations.append(
+            HeadAttestation(
+                repository=REPOSITORY,
+                delivery_id=DELIVERY_ID,
+                review_charter_version=REVIEW_CHARTER_VERSION,
+                reviewed_head_sha=reviewed_head,
+                head_sha=descendant_head,
+                kind=HeadAttestationKind.EXHAUSTED_DELIVERY_CONTINUITY,
+                delta_sha256="a" * 64,
+                evidence=["unit:continuity"],
+                attested_by="gaia-review-local",
+            )
+        )
+
+        self.assertEqual(
+            ledger.missing_slots_for_stage(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            ["local:1"],
+        )
+
+    def test_advance_head_retains_attestation_audit_history(self) -> None:
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {"reviewer_count": 1, "max_generation_rounds": 1},
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        reviewed_head = "a" * 40
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=reviewed_head)
+        ledger.submit(result(head_sha=reviewed_head, findings=[]))
+        ledger.advance_head(CURRENT_HEAD)
+        ledger.record_head_attestation(
+            HeadAttestation(
+                repository=REPOSITORY,
+                delivery_id=DELIVERY_ID,
+                review_charter_version=REVIEW_CHARTER_VERSION,
+                reviewed_head_sha=reviewed_head,
+                head_sha=CURRENT_HEAD,
+                kind=HeadAttestationKind.EXHAUSTED_DELIVERY_CONTINUITY,
+                delta_sha256="a" * 64,
+                evidence=["unit:continuity"],
+                attested_by="gaia-review-local",
+            ),
+            stage_policy=stage_policy,
+        )
+
+        ledger.advance_head("d" * 40)
+
+        self.assertEqual(len(ledger.head_attestations), 1)
+        self.assertEqual(ledger.head_attestations[0].head_sha, CURRENT_HEAD)
+        ReviewLedgerModel.model_validate(ledger.model_dump())
 
     def test_attestation_rejects_head_without_completed_local_quorum(self) -> None:
         stage_policy = ReviewPolicy.model_validate(

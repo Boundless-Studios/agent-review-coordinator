@@ -186,7 +186,12 @@ class Finding(BaseModel):
             invariant=self.invariant,
             title=self.title,
         )
-        if supplied_fingerprint and self.lineage_id != calculated_lineage:
+        lineage_was_supplied = "lineage_id" in self.model_fields_set
+        if (
+            supplied_fingerprint
+            and lineage_was_supplied
+            and self.lineage_id != calculated_lineage
+        ):
             raise ValueError("finding lineage_id does not match normalized content")
         self.lineage_id = calculated_lineage
         if not self.contributing_execution_ids:
