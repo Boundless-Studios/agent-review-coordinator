@@ -258,6 +258,33 @@ class SettlementTest(unittest.TestCase):
                 ledger.model_dump() | {"architecture_decisions": [decision.model_dump()]}
             )
 
+    def test_persisted_ledger_rejects_conflicting_decisions_for_one_lineage(
+        self,
+    ) -> None:
+        ledger, lineage_id = self._recurring_ledger()
+        decisions = [
+            ArchitectureDecision(
+                repository=REPOSITORY,
+                delivery_id=ledger.delivery_id,
+                review_charter_version=ledger.review_charter_version,
+                lineage_id=lineage_id,
+                decision=kind,
+                rationale="One auditable terminal decision is required.",
+                decided_by="human:owner",
+            ).model_dump()
+            for kind in (
+                ArchitectureDecisionKind.CORE_FIX_PLANNED,
+                ArchitectureDecisionKind.EXPLICITLY_DEFERRED,
+            )
+        ]
+
+        with self.assertRaisesRegex(
+            ValidationError, "multiple architecture decisions for one lineage"
+        ):
+            ReviewLedger.model_validate(
+                ledger.model_dump() | {"architecture_decisions": decisions}
+            )
+
     def test_recurring_lineage_requires_one_architecture_decision(self) -> None:
         source = finding().model_dump()
         first = Finding.model_validate(

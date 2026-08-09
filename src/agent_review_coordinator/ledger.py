@@ -290,7 +290,11 @@ class ReviewLedger(BaseModel):
                 raise ValueError(
                     "attestation review_charter_version does not match ledger"
                 )
+        decided_lineages: set[str] = set()
         for decision in self.architecture_decisions:
+            if decision.lineage_id in decided_lineages:
+                raise ValueError("multiple architecture decisions for one lineage")
+            decided_lineages.add(decision.lineage_id)
             if decision.repository != self.repository:
                 raise ValueError("architecture decision repository does not match ledger")
             if decision.delivery_id != self.delivery_id:
