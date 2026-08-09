@@ -24,6 +24,9 @@ _SEVERITY_RANK = {
     Severity.P0: 3,
 }
 
+# Quorum search is exact within this supported state budget; it never truncates.
+_MAX_QUORUM_SEARCH_STATES = 50_000
+
 
 def _merge_p2_evidence(
     current: P2Evidence | None,
@@ -359,17 +362,25 @@ class ReviewLedger(BaseModel):
 
         ordered = sorted(candidates_by_slot, key=len)
         failed: set[tuple[int, frozenset[str], frozenset[str]]] = set()
+        visited_states = 0
 
         def search(
             index: int,
             used_executions: frozenset[str],
             used_providers: frozenset[str],
         ) -> bool:
+            nonlocal visited_states
             if index == len(ordered):
                 return True
             state = (index, used_executions, used_providers)
             if state in failed:
                 return False
+            if visited_states >= _MAX_QUORUM_SEARCH_STATES:
+                raise ValueError(
+                    "quorum candidate complexity exceeds supported search budget; "
+                    "reduce reviewer slots or retry candidates"
+                )
+            visited_states += 1
             remaining = len(ordered) - index
             if distinct_executions:
                 available_executions = {

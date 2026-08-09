@@ -73,6 +73,52 @@ def result(
 
 
 class ReviewLedgerTest(unittest.TestCase):
+    def test_adversarial_quorum_fails_fast_at_search_budget(self) -> None:
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 2,
+                        "required_results": 2,
+                        "distinct_executions": True,
+                        "distinct_providers": True,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        identities = [
+            (1, "execution-a", "provider-a"),
+            (1, "execution-b", "provider-b"),
+            (2, "execution-a", "provider-b"),
+            (2, "execution-b", "provider-a"),
+        ]
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=CURRENT_HEAD,
+            results=[
+                result(
+                    execution_id=execution_id,
+                    slot_number=slot_number,
+                    findings=[],
+                ).model_copy(update={"reviewer_provider": provider})
+                for slot_number, execution_id, provider in identities
+            ],
+        )
+
+        with (
+            patch("agent_review_coordinator.ledger._MAX_QUORUM_SEARCH_STATES", 1),
+            self.assertRaisesRegex(
+                ValueError,
+                "quorum candidate complexity exceeds supported search budget",
+            ),
+        ):
+            ledger.missing_slots_for_stage(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            )
+
     def test_large_quorum_does_not_enumerate_cartesian_product(self) -> None:
         stage_policy = ReviewPolicy.model_validate(
             {

@@ -8,6 +8,8 @@ from typing import Literal, Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+MAX_REVIEWER_COUNT = 8
+
 
 class ReviewStage(StrEnum):
     """A review stage whose slots are filled by an integration."""
@@ -21,8 +23,12 @@ class ReviewStagePolicy(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    reviewer_count: int = Field(ge=1)
-    required_results: int | None = Field(default=None, ge=1)
+    reviewer_count: int = Field(ge=1, le=MAX_REVIEWER_COUNT)
+    required_results: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_REVIEWER_COUNT,
+    )
     distinct_executions: bool = True
     distinct_providers: bool = False
     initial_scope: Literal["full"] = "full"
