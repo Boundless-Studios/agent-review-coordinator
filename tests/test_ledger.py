@@ -52,19 +52,108 @@ def result(
     *,
     head_sha: str = CURRENT_HEAD,
     execution_id: str = "local-r1-slot1",
+    round_number: int = 1,
+    slot_number: int = 1,
+    findings: list[Finding] | None = None,
 ) -> ReviewResult:
     return ReviewResult(
         repository=REPOSITORY,
         head_sha=head_sha,
         stage=ReviewStage.LOCAL,
-        round_number=1,
-        slot_number=1,
+        round_number=round_number,
+        slot_number=slot_number,
         reviewer_execution_id=execution_id,
-        findings=[finding(head_sha=head_sha, execution_id=execution_id)],
+        findings=(
+            findings
+            if findings is not None
+            else [finding(head_sha=head_sha, execution_id=execution_id)]
+        ),
     )
 
 
 class ReviewLedgerTest(unittest.TestCase):
+    def test_next_allowed_round_is_cumulative_across_heads(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 1,
+                        "required_results": 1,
+                        "max_generation_rounds": 2,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+
+        self.assertEqual(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            1,
+        )
+        ledger.submit(result(findings=[]))
+        self.assertEqual(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            2,
+        )
+        next_head = "c" * 40
+        ledger.advance_head(next_head)
+        ledger.submit(result(head_sha=next_head, round_number=2, findings=[]))
+
+        self.assertIsNone(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            )
+        )
+
+    def test_incomplete_quorum_and_retry_do_not_consume_round(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 2,
+                        "required_results": 2,
+                        "max_generation_rounds": 2,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        ledger.submit(result(findings=[]))
+        ledger.submit(result(execution_id="local-r1-retry", findings=[]))
+
+        self.assertEqual(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            1,
+        )
+        ledger.submit(
+            result(
+                execution_id="local-r1-slot2",
+                slot_number=2,
+                findings=[],
+            )
+        )
+        self.assertEqual(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            2,
+        )
+
     def test_delivery_identity_fields_are_required_and_nonempty(self) -> None:
         ledger = ReviewLedger(
             repository=REPOSITORY,

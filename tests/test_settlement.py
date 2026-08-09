@@ -124,6 +124,14 @@ def result(
 
 def reviewed_ledger(item: Finding, *, round_number: int = 1) -> ReviewLedger:
     ledger = ReviewLedger(repository=REPOSITORY, head_sha=HEAD)
+    for completed_round in range(1, round_number):
+        ledger.submit(
+            result(
+                stage=ReviewStage.LOCAL,
+                round_number=completed_round,
+                execution_id=f"local-review-r{completed_round}",
+            )
+        )
     ledger.submit(
         result(
             stage=ReviewStage.LOCAL,
@@ -375,6 +383,25 @@ class SettlementTest(unittest.TestCase):
         self.assertFalse(report.settled)
         self.assertIn("address_p1", report.required_actions)
         self.assertFalse(report.allow_full_review)
+
+    def test_final_generation_defers_p2_even_when_evidence_requires_fix(self) -> None:
+        item = finding().model_copy(
+            update={"p2_evidence": p2_evidence(security_risk=True)}
+        )
+        ledger = reviewed_ledger(item, round_number=2)
+        fingerprint = ledger.current_findings[0].fingerprint
+
+        report = evaluate(policy=policy(max_rounds=2), ledger=ledger)
+
+        deferred = ledger.current_findings[0]
+        self.assertTrue(report.settled)
+        self.assertEqual(deferred.disposition, Disposition.DEFER)
+        self.assertIn("review_budget_exhausted", deferred.rationale or "")
+        self.assertIn("generation=2", deferred.rationale or "")
+        self.assertIn("max_generation_rounds=2", deferred.rationale or "")
+        self.assertIn("local-review", deferred.rationale or "")
+        self.assertNotIn(fingerprint, report.blocking_fingerprints)
+
 
     def test_deferred_p2_allows_settlement(self) -> None:
         item = finding().model_copy(

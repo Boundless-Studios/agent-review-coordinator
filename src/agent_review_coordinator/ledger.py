@@ -15,7 +15,7 @@ from .findings import (
     Reachability,
     Severity,
 )
-from .policy import ReviewStage
+from .policy import ReviewStage, ReviewStagePolicy
 
 _SEVERITY_RANK = {
     Severity.P3: 0,
@@ -218,6 +218,50 @@ class ReviewLedger(BaseModel):
         """Canonical, deduplicated findings for the ledger's current head."""
 
         return self.findings
+
+    def next_allowed_round(
+        self,
+        *,
+        stage: ReviewStage,
+        stage_policy: ReviewStagePolicy,
+    ) -> int | None:
+        """Return the next generation number, or ``None`` when exhausted."""
+
+        required = stage_policy.required_results or stage_policy.reviewer_count
+        grouped: dict[tuple[str, int], list[ReviewResult]] = {}
+        for result in self.results:
+            if result.stage is stage:
+                grouped.setdefault(
+                    (result.head_sha, result.round_number), []
+                ).append(result)
+
+        completed = 0
+        for results in grouped.values():
+            by_slot = {
+                result.slot_number: result
+                for result in results
+                if 1 <= result.slot_number <= required
+            }
+            if len(by_slot) < required:
+                continue
+            required_results = [by_slot[slot] for slot in range(1, required + 1)]
+            if stage_policy.distinct_executions and len(
+                {result.reviewer_execution_id for result in required_results}
+            ) < required:
+                continue
+            if stage_policy.distinct_providers and len(
+                {
+                    result.reviewer_provider
+                    for result in required_results
+                    if result.reviewer_provider
+                }
+            ) < required:
+                continue
+            completed += 1
+
+        if completed >= stage_policy.max_generation_rounds:
+            return None
+        return completed + 1
 
     def advance_head(self, head_sha: str) -> None:
         """Advance to a descendant snapshot while retaining stale audit history."""

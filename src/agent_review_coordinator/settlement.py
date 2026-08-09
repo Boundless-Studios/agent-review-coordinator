@@ -114,6 +114,12 @@ def _finding_action(finding: Finding) -> str | None:
             return None
         return f"address_{finding.severity.value}"
 
+    if (
+        disposition is Disposition.DEFER
+        and finding.rationale
+        and "review_budget_exhausted" in finding.rationale
+    ):
+        return None
     if disposition is None:
         return "fix_reproduced_p2" if finding.reproduction else "evaluate_p2"
     if disposition is Disposition.FIX_NOW:
@@ -217,17 +223,40 @@ def _finding_state(finding: Finding) -> FindingSettlementState:
 
 
 def _full_review_allowed(policy: ReviewPolicy, ledger: ReviewLedger) -> bool:
-    local_rounds = [
-        result.round_number
-        for result in ledger.results
-        if not result.stale and result.stage is ReviewStage.LOCAL
-    ]
-    last_round = max(local_rounds, default=0)
-    return last_round < policy.review.local.max_generation_rounds
+    return (
+        ledger.next_allowed_round(
+            stage=ReviewStage.LOCAL,
+            stage_policy=policy.review.local,
+        )
+        is not None
+    )
+
+
+def _defer_p2_at_budget_exhaustion(
+    *, policy: ReviewPolicy, ledger: ReviewLedger
+) -> None:
+    if _full_review_allowed(policy, ledger):
+        return
+    maximum = policy.review.local.max_generation_rounds
+    for finding in ledger.current_findings:
+        if finding.severity is not Severity.P2 or _finding_action(finding) is None:
+            continue
+        executions = ",".join(finding.contributing_execution_ids)
+        ledger.record_disposition(
+            fingerprint=finding.fingerprint,
+            disposition=Disposition.DEFER,
+            rationale=(
+                "review_budget_exhausted "
+                f"generation={maximum} max_generation_rounds={maximum} "
+                f"contributing_reviewer_execution_ids={executions}"
+            ),
+        )
 
 
 def evaluate(*, policy: ReviewPolicy, ledger: ReviewLedger) -> SettlementReport:
     """Apply reviewer quorum, severity, disposition, and budget rules."""
+
+    _defer_p2_at_budget_exhaustion(policy=policy, ledger=ledger)
 
     missing_slots = [
         *_missing_for_stage(
