@@ -18,11 +18,21 @@ from agent_review_coordinator.findings import (
     Reachability,
     Severity,
 )
-from agent_review_coordinator.ledger import ReviewLedger, ReviewResult
+from agent_review_coordinator.ledger import ReviewLedger as ReviewLedgerModel
+from agent_review_coordinator.ledger import ReviewResult
 from agent_review_coordinator.policy import ReviewStage
 
 REPOSITORY = "Boundless-Studios/gaia-free"
 HEAD = "d" * 40
+DELIVERY_ID = "repo:branch:base"
+REVIEW_CHARTER_VERSION = "gaia-v1"
+
+
+class ReviewLedger(ReviewLedgerModel):
+    """Ledger fixture carrying the required delivery identity."""
+
+    delivery_id: str = DELIVERY_ID
+    review_charter_version: str = REVIEW_CHARTER_VERSION
 
 
 def write_policy(path: Path) -> None:
@@ -128,6 +138,10 @@ class CliTest(unittest.TestCase):
                     REPOSITORY,
                     "--head-sha",
                     HEAD,
+                    "--delivery-id",
+                    DELIVERY_ID,
+                    "--review-charter-version",
+                    REVIEW_CHARTER_VERSION,
                     "--result",
                     str(result_path),
                 ]
@@ -139,7 +153,57 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(len(stored.results), 1)
+        self.assertEqual(json.loads(stdout)["version"], 2)
         self.assertEqual(json.loads(stdout)["head_sha"], HEAD)
+        self.assertEqual(stored.delivery_id, DELIVERY_ID)
+        self.assertEqual(stored.review_charter_version, REVIEW_CHARTER_VERSION)
+
+    def test_submit_rejects_existing_ledger_delivery_identity_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger_path = root / "ledger.json"
+            result_path = root / "result.json"
+            ledger_path.write_text(
+                ReviewLedger(
+                    repository=REPOSITORY,
+                    head_sha=HEAD,
+                    delivery_id=DELIVERY_ID,
+                    review_charter_version=REVIEW_CHARTER_VERSION,
+                ).model_dump_json(),
+                encoding="utf-8",
+            )
+            result_path.write_text(
+                ReviewResult(
+                    repository=REPOSITORY,
+                    head_sha=HEAD,
+                    stage=ReviewStage.LOCAL,
+                    round_number=1,
+                    slot_number=1,
+                    reviewer_execution_id="local-r1-slot1",
+                ).model_dump_json(),
+                encoding="utf-8",
+            )
+
+            code, _, stderr = run_cli(
+                [
+                    "submit",
+                    "--ledger",
+                    str(ledger_path),
+                    "--repository",
+                    REPOSITORY,
+                    "--head-sha",
+                    HEAD,
+                    "--delivery-id",
+                    "repo:other-branch:base",
+                    "--review-charter-version",
+                    REVIEW_CHARTER_VERSION,
+                    "--result",
+                    str(result_path),
+                ]
+            )
+
+        self.assertEqual(code, 2)
+        self.assertIn("ledger identity does not match", stderr)
 
     def test_disposition_updates_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -364,6 +428,10 @@ class CliTest(unittest.TestCase):
                 REPOSITORY,
                 "--head-sha",
                 HEAD,
+                "--delivery-id",
+                DELIVERY_ID,
+                "--review-charter-version",
+                REVIEW_CHARTER_VERSION,
                 "--result",
                 str(result_path),
             ]

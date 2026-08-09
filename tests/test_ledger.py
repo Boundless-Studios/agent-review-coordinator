@@ -1,4 +1,7 @@
 import unittest
+from unittest.mock import patch
+
+from pydantic import ValidationError
 
 from agent_review_coordinator.findings import (
     Disposition,
@@ -11,11 +14,22 @@ from agent_review_coordinator.findings import (
     Reachability,
     Severity,
 )
-from agent_review_coordinator.ledger import ReviewLedger, ReviewResult
-from agent_review_coordinator.policy import ReviewStage
+from agent_review_coordinator.ledger import ReviewLedger as ReviewLedgerModel
+from agent_review_coordinator.ledger import ReviewResult
+from agent_review_coordinator.policy import ReviewPolicy, ReviewStage
+from agent_review_coordinator.settlement import evaluate
 
 REPOSITORY = "Boundless-Studios/gaia-free"
 CURRENT_HEAD = "b" * 40
+DELIVERY_ID = "repo:branch:base"
+REVIEW_CHARTER_VERSION = "gaia-v1"
+
+
+class ReviewLedger(ReviewLedgerModel):
+    """Ledger fixture carrying the required delivery identity."""
+
+    delivery_id: str = DELIVERY_ID
+    review_charter_version: str = REVIEW_CHARTER_VERSION
 
 
 def finding(
@@ -39,19 +53,404 @@ def result(
     *,
     head_sha: str = CURRENT_HEAD,
     execution_id: str = "local-r1-slot1",
+    round_number: int = 1,
+    slot_number: int = 1,
+    findings: list[Finding] | None = None,
 ) -> ReviewResult:
     return ReviewResult(
         repository=REPOSITORY,
         head_sha=head_sha,
         stage=ReviewStage.LOCAL,
-        round_number=1,
-        slot_number=1,
+        round_number=round_number,
+        slot_number=slot_number,
         reviewer_execution_id=execution_id,
-        findings=[finding(head_sha=head_sha, execution_id=execution_id)],
+        findings=(
+            findings
+            if findings is not None
+            else [finding(head_sha=head_sha, execution_id=execution_id)]
+        ),
     )
 
 
 class ReviewLedgerTest(unittest.TestCase):
+    def test_protocol_v1_ledger_is_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            ReviewLedgerModel.model_validate(
+                {
+                    "version": 1,
+                    "repository": REPOSITORY,
+                    "head_sha": CURRENT_HEAD,
+                    "delivery_id": DELIVERY_ID,
+                    "review_charter_version": REVIEW_CHARTER_VERSION,
+                }
+            )
+
+    def test_protocol_v2_ledger_round_trips(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+
+        restored = ReviewLedgerModel.model_validate_json(ledger.model_dump_json())
+
+        self.assertEqual(restored.version, 2)
+        self.assertEqual(restored.model_dump(), ledger.model_dump())
+
+    def test_adversarial_quorum_fails_fast_at_search_budget(self) -> None:
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 2,
+                        "required_results": 2,
+                        "distinct_executions": True,
+                        "distinct_providers": True,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        identities = [
+            (1, "execution-a", "provider-a"),
+            (1, "execution-b", "provider-b"),
+            (2, "execution-a", "provider-b"),
+            (2, "execution-b", "provider-a"),
+        ]
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=CURRENT_HEAD,
+            results=[
+                result(
+                    execution_id=execution_id,
+                    slot_number=slot_number,
+                    findings=[],
+                ).model_copy(update={"reviewer_provider": provider})
+                for slot_number, execution_id, provider in identities
+            ],
+        )
+
+        with (
+            patch("agent_review_coordinator.ledger._MAX_QUORUM_SEARCH_STATES", 1),
+            self.assertRaisesRegex(
+                ValueError,
+                "quorum candidate complexity exceeds supported search budget",
+            ),
+        ):
+            ledger.missing_slots_for_stage(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            )
+
+    def test_large_quorum_does_not_enumerate_cartesian_product(self) -> None:
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 8,
+                        "required_results": 8,
+                        "distinct_executions": True,
+                        "distinct_providers": True,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        results = [
+            result(
+                execution_id=f"execution-{candidate}",
+                slot_number=slot,
+                findings=[],
+            ).model_copy(update={"reviewer_provider": f"provider-{candidate}"})
+            for slot in range(1, 9)
+            for candidate in range(10)
+        ]
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=CURRENT_HEAD,
+            results=results,
+        )
+
+        with patch(
+            "agent_review_coordinator.ledger.product",
+            create=True,
+            side_effect=AssertionError("Cartesian enumeration is forbidden"),
+        ):
+            missing = ledger.missing_slots_for_stage(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            )
+
+        self.assertEqual(missing, [])
+
+    def test_next_allowed_round_is_cumulative_across_heads(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 1,
+                        "required_results": 1,
+                        "max_generation_rounds": 2,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+
+        self.assertEqual(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            1,
+        )
+        ledger.submit(result(findings=[]))
+        self.assertEqual(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            2,
+        )
+        next_head = "c" * 40
+        ledger.advance_head(next_head)
+        ledger.submit(result(head_sha=next_head, round_number=2, findings=[]))
+
+        self.assertIsNone(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            )
+        )
+
+    def test_incomplete_quorum_and_retry_do_not_consume_round(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 2,
+                        "required_results": 2,
+                        "max_generation_rounds": 2,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        ledger.submit(result(findings=[]))
+        ledger.submit(result(execution_id="local-r1-retry", findings=[]))
+
+        self.assertEqual(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            1,
+        )
+        ledger.submit(
+            result(
+                execution_id="local-r1-slot2",
+                slot_number=2,
+                findings=[],
+            )
+        )
+        self.assertEqual(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            2,
+        )
+
+    def test_reused_round_number_on_descendant_is_one_generation(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 1,
+                        "max_generation_rounds": 2,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        ledger.submit(result(findings=[]))
+        next_head = "d" * 40
+        ledger.advance_head(next_head)
+        ledger.submit(result(head_sha=next_head, findings=[]))
+
+        self.assertEqual(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            2,
+        )
+
+    def test_later_conflicting_retry_cannot_erase_completed_quorum(self) -> None:
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 2,
+                        "required_results": 2,
+                        "distinct_executions": True,
+                        "distinct_providers": True,
+                        "max_generation_rounds": 2,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=CURRENT_HEAD,
+            results=[
+                result(execution_id="execution-a", slot_number=1, findings=[]).model_copy(
+                    update={"reviewer_provider": "provider-a"}
+                ),
+                result(execution_id="execution-b", slot_number=2, findings=[]).model_copy(
+                    update={"reviewer_provider": "provider-b"}
+                ),
+                result(execution_id="execution-a", slot_number=2, findings=[]).model_copy(
+                    update={"reviewer_provider": "provider-a"}
+                ),
+            ],
+        )
+
+        self.assertEqual(
+            ledger.next_allowed_round(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            ),
+            2,
+        )
+
+    def test_delivery_identity_fields_are_required_and_nonempty(self) -> None:
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=CURRENT_HEAD,
+            delivery_id=DELIVERY_ID,
+            review_charter_version=REVIEW_CHARTER_VERSION,
+        )
+        self.assertEqual(ledger.delivery_id, DELIVERY_ID)
+        self.assertEqual(ledger.review_charter_version, REVIEW_CHARTER_VERSION)
+        with self.assertRaises(ValidationError):
+            ReviewLedgerModel(
+                repository=REPOSITORY,
+                head_sha=CURRENT_HEAD,
+                delivery_id="",
+                review_charter_version=REVIEW_CHARTER_VERSION,
+            )
+        with self.assertRaises(ValidationError):
+            ReviewLedgerModel(
+                repository=REPOSITORY,
+                head_sha=CURRENT_HEAD,
+                delivery_id=DELIVERY_ID,
+                review_charter_version="",
+            )
+
+    def test_advance_head_carries_findings_and_resets_verification(self) -> None:
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=CURRENT_HEAD,
+            delivery_id=DELIVERY_ID,
+            review_charter_version=REVIEW_CHARTER_VERSION,
+        )
+        original = result().model_copy(update={"round_number": 2})
+        ledger.submit(original)
+        original_fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=original_fingerprint,
+            disposition=Disposition.DEFERRED_TO_EXISTING_ISSUE,
+            rationale="Tracked by the existing delivery issue.",
+            deferred_to_issue="BOU-1234",
+        )
+        ledger.record_verification(
+            fingerprint=original_fingerprint,
+            passed=True,
+        )
+        next_head = "c" * 40
+
+        ledger.advance_head(next_head)
+
+        self.assertEqual(ledger.head_sha, next_head)
+        self.assertEqual(len(ledger.current_findings), 1)
+        carried = ledger.current_findings[0]
+        self.assertEqual(carried.head_sha, next_head)
+        self.assertNotEqual(carried.fingerprint, original_fingerprint)
+        self.assertEqual(
+            carried.disposition,
+            Disposition.DEFERRED_TO_EXISTING_ISSUE,
+        )
+        self.assertEqual(
+            carried.rationale,
+            "Tracked by the existing delivery issue.",
+        )
+        self.assertEqual(carried.deferred_to_issue, "BOU-1234")
+        self.assertIsNone(carried.duplicate_of)
+        self.assertFalse(carried.verification_passed)
+        self.assertEqual(len(ledger.results), 1)
+        self.assertTrue(ledger.results[0].stale)
+        self.assertEqual(ledger.results[0].head_sha, CURRENT_HEAD)
+        self.assertEqual(ledger.results[0].round_number, 2)
+        self.assertFalse(original.stale)
+
+    def test_advance_head_keeps_existing_target_head_result_current(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        next_head = "c" * 40
+        target_result = result(head_sha=next_head)
+        ledger.submit(target_result)
+        self.assertTrue(ledger.results[0].stale)
+
+        ledger.advance_head(next_head)
+
+        self.assertFalse(ledger.results[0].stale)
+        ReviewLedgerModel.model_validate(ledger.model_dump())
+
+    def test_advance_head_canonicalizes_activated_target_findings(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        next_head = "c" * 40
+        blocking = finding(head_sha=next_head).model_copy(
+            update={"severity": Severity.P1}
+        )
+        target_result = result(head_sha=next_head).model_copy(
+            update={"findings": [blocking]}
+        )
+        ledger.submit(target_result)
+
+        ledger.advance_head(next_head)
+
+        self.assertEqual(len(ledger.results), 1)
+        self.assertFalse(ledger.results[0].stale)
+        self.assertEqual(ledger.current_findings, [blocking])
+        report = evaluate(
+            policy=ReviewPolicy.model_validate(
+                {
+                    "version": 1,
+                    "review": {
+                        "local": {
+                            "reviewer_count": 1,
+                            "required_results": 1,
+                            "max_generation_rounds": 2,
+                        },
+                        "backstop": {
+                            "reviewer_count": 1,
+                            "required_results": 1,
+                            "trigger": "new_head_sha",
+                        },
+                    },
+                }
+            ),
+            ledger=ledger,
+        )
+        self.assertIn("address_p1", report.required_actions)
+        self.assertIn(blocking.fingerprint, report.blocking_fingerprints)
+
     def test_new_keyed_evidence_is_retained_and_reopens_finding(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
         first_artifact = EvidenceArtifact(

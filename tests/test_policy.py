@@ -128,6 +128,19 @@ class ReviewPolicyTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ReviewStagePolicy(reviewer_count=1, required_results=2)
 
+    def test_reviewer_count_is_capped_at_supported_maximum(self) -> None:
+        self.assertEqual(ReviewStagePolicy(reviewer_count=8).reviewer_count, 8)
+        with self.assertRaises(ValidationError):
+            ReviewStagePolicy(reviewer_count=9)
+
+    def test_required_results_is_capped_at_supported_maximum(self) -> None:
+        self.assertEqual(
+            ReviewStagePolicy(reviewer_count=8, required_results=8).required_results,
+            8,
+        )
+        with self.assertRaises(ValidationError):
+            ReviewStagePolicy(reviewer_count=9, required_results=9)
+
     def test_policy_loads_from_yaml(self) -> None:
         policy = ReviewPolicy.from_yaml(
             """

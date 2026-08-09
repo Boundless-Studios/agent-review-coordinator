@@ -36,10 +36,12 @@ executions of the same provider, or another reviewer. Set
 
 ## Protocol
 
-Integrations create a `ReviewLedger` for an immutable repository and head SHA,
-submit versioned `ReviewResult` documents, record explicit finding dispositions,
-and call `evaluate`. Findings from older heads remain available for audit but do
-not participate in current settlement.
+Integrations create a protocol-v2 `ReviewLedger` for one delivery identity: a
+repository, `delivery_id`, and `review_charter_version`. The ledger's `head_sha`
+advances with the delivery. Integrations submit versioned `ReviewResult`
+documents, record explicit finding dispositions, and call `evaluate`. Findings
+from older heads remain available for audit but do not participate in current
+settlement.
 
 The contract has two independent axes:
 
@@ -61,6 +63,12 @@ require a fix or an explicit deferral to existing work. Unsupported,
 unreachable, low-impact findings whose fix requires disproportionate
 architecture may be declined with rationale.
 
+Review generation rounds are cumulative across every head in one delivery
+ledger. A round consumes budget only after its required slot quorum completes;
+reusing a completed round number on a descendant head does not create another
+generation. With `max_generation_rounds: 2`, completed rounds 1 and 2 exhaust
+full-review generation for the delivery.
+
 Retrying the same provider and slot without new evidence is idempotent even when
 the adapter assigns a new execution ID or review round. It neither consumes
 another stored run nor creates another finding. Evidence merges monotonically:
@@ -70,8 +78,11 @@ weaker evidence cannot overwrite the canonical record or reset convergence. Use
 has genuinely new evidence: a new key is retained and reopens the finding,
 while rephrasing the summary for an existing key is idempotent. Legacy
 disposition values remain readable but follow the same P2-evidence policy.
-Review-generation limits never waive a known blocking finding, and no
-disposition creates tracker work.
+At the final completed local generation, remaining P2 findings are recorded as
+`Disposition.DEFER` with a `review_budget_exhausted` audit rationale, even when
+their evidence would otherwise request a fix or proof. P0 and P1 findings are
+never auto-disposed and remain blocking. No disposition creates tracker work or
+requires an existing tracker issue.
 
 The CLI exposes the same JSON contract:
 
@@ -89,6 +100,8 @@ agent-review-coordinator submit \
   --ledger review-ledger.json \
   --repository Boundless-Studios/gaia-free \
   --head-sha "$COMMIT_SHA" \
+  --delivery-id "Boundless-Studios/gaia-free:feature-branch:base-sha" \
+  --review-charter-version "gaia-v1" \
   --result local-review-result.json
 
 agent-review-coordinator disposition \

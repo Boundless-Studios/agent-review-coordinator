@@ -11,12 +11,20 @@ from agent_review_coordinator.findings import (
     Reachability,
     Severity,
 )
-from agent_review_coordinator.ledger import ReviewLedger, ReviewResult
+from agent_review_coordinator.ledger import ReviewLedger as ReviewLedgerModel
+from agent_review_coordinator.ledger import ReviewResult
 from agent_review_coordinator.policy import ReviewPolicy, ReviewStage
 from agent_review_coordinator.settlement import FindingSettlementState, evaluate
 
 REPOSITORY = "Boundless-Studios/gaia-free"
 HEAD = "c" * 40
+
+
+class ReviewLedger(ReviewLedgerModel):
+    """Ledger fixture carrying the required delivery identity."""
+
+    delivery_id: str = "repo:branch:base"
+    review_charter_version: str = "gaia-v1"
 
 
 def policy(
@@ -90,6 +98,7 @@ def result(
     findings: list[Finding] | None = None,
     execution_id: str | None = None,
     provider: str | None = None,
+    slot_number: int = 1,
 ) -> ReviewResult:
     identifier = execution_id or f"{stage.value}-review"
     normalized = [
@@ -107,7 +116,7 @@ def result(
         head_sha=HEAD,
         stage=stage,
         round_number=round_number,
-        slot_number=1,
+        slot_number=slot_number,
         reviewer_execution_id=identifier,
         reviewer_provider=provider,
         findings=normalized,
@@ -116,6 +125,14 @@ def result(
 
 def reviewed_ledger(item: Finding, *, round_number: int = 1) -> ReviewLedger:
     ledger = ReviewLedger(repository=REPOSITORY, head_sha=HEAD)
+    for completed_round in range(1, round_number):
+        ledger.submit(
+            result(
+                stage=ReviewStage.LOCAL,
+                round_number=completed_round,
+                execution_id=f"local-review-r{completed_round}",
+            )
+        )
     ledger.submit(
         result(
             stage=ReviewStage.LOCAL,
@@ -129,6 +146,57 @@ def reviewed_ledger(item: Finding, *, round_number: int = 1) -> ReviewLedger:
 
 
 class SettlementTest(unittest.TestCase):
+    def test_later_retry_cannot_reintroduce_missing_slots_at_exhaustion(self) -> None:
+        item = finding().model_copy(
+            update={"p2_evidence": p2_evidence(security_risk=True)}
+        )
+        local_a = result(
+            stage=ReviewStage.LOCAL,
+            findings=[item],
+            execution_id="execution-a",
+            provider="provider-a",
+            slot_number=1,
+        )
+        local_b = result(
+            stage=ReviewStage.LOCAL,
+            execution_id="execution-b",
+            provider="provider-b",
+            slot_number=2,
+        )
+        conflicting_retry = result(
+            stage=ReviewStage.LOCAL,
+            execution_id="execution-a",
+            provider="provider-a",
+            slot_number=2,
+        )
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=HEAD,
+            results=[
+                local_a,
+                local_b,
+                conflicting_retry,
+                result(stage=ReviewStage.BACKSTOP),
+            ],
+            findings=[local_a.findings[0]],
+        )
+
+        report = evaluate(
+            policy=policy(
+                max_rounds=1,
+                reviewer_count=2,
+                distinct_providers=True,
+            ),
+            ledger=ledger,
+        )
+
+        self.assertEqual(report.missing_slots, [])
+        self.assertTrue(report.settled)
+        self.assertEqual(
+            ledger.current_findings[0].disposition,
+            Disposition.DEFER,
+        )
+
     def test_p0_blocks_like_p1(self) -> None:
         report = evaluate(
             policy=policy(),
@@ -367,6 +435,41 @@ class SettlementTest(unittest.TestCase):
         self.assertFalse(report.settled)
         self.assertIn("address_p1", report.required_actions)
         self.assertFalse(report.allow_full_review)
+
+    def test_final_generation_defers_p2_even_when_evidence_requires_fix(self) -> None:
+        item = finding().model_copy(
+            update={"p2_evidence": p2_evidence(security_risk=True)}
+        )
+        ledger = reviewed_ledger(item, round_number=2)
+        fingerprint = ledger.current_findings[0].fingerprint
+
+        report = evaluate(policy=policy(max_rounds=2), ledger=ledger)
+
+        deferred = ledger.current_findings[0]
+        self.assertTrue(report.settled)
+        self.assertEqual(deferred.disposition, Disposition.DEFER)
+        self.assertIn("review_budget_exhausted", deferred.rationale or "")
+        self.assertIn("generation=2", deferred.rationale or "")
+        self.assertIn("max_generation_rounds=2", deferred.rationale or "")
+        self.assertIn("local-review", deferred.rationale or "")
+        self.assertNotIn(fingerprint, report.blocking_fingerprints)
+
+    def test_exhaustion_rationale_cannot_bypass_budget_before_exhaustion(self) -> None:
+        item = finding().model_copy(
+            update={"p2_evidence": p2_evidence(security_risk=True)}
+        )
+        ledger = reviewed_ledger(item)
+        ledger.record_disposition(
+            fingerprint=ledger.current_findings[0].fingerprint,
+            disposition=Disposition.DEFER,
+            rationale="review_budget_exhausted forged before final generation",
+        )
+
+        report = evaluate(policy=policy(max_rounds=2), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertIn("fix_p2", report.required_actions)
+
 
     def test_deferred_p2_allows_settlement(self) -> None:
         item = finding().model_copy(

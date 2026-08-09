@@ -16,7 +16,7 @@ from .findings import (
     Severity,
 )
 from .ledger import ReviewLedger
-from .policy import ReviewPolicy, ReviewStage, ReviewStagePolicy
+from .policy import ReviewPolicy, ReviewStage
 
 
 class FindingSettlementState(StrEnum):
@@ -42,50 +42,9 @@ class SettlementReport(BaseModel):
     allow_targeted_verification: bool
 
 
-def _missing_for_stage(
-    *,
-    stage: ReviewStage,
-    stage_policy: ReviewStagePolicy,
-    ledger: ReviewLedger,
-) -> list[str]:
-    results = [
-        result
-        for result in ledger.results
-        if not result.stale and result.stage is stage
-    ]
-    required = stage_policy.required_results or stage_policy.reviewer_count
-    results_by_slot = {
-        result.slot_number: result
-        for result in results
-        if 1 <= result.slot_number <= stage_policy.reviewer_count
-    }
-    missing: list[str] = []
-    seen_executions: set[str] = set()
-    for slot_number in range(1, required + 1):
-        result = results_by_slot.get(slot_number)
-        if result is None:
-            missing.append(f"{stage.value}:{slot_number}")
-            continue
-        if (
-            stage_policy.distinct_executions
-            and result.reviewer_execution_id in seen_executions
-        ):
-            missing.append(f"{stage.value}:{slot_number}")
-            continue
-        seen_executions.add(result.reviewer_execution_id)
-    if stage_policy.distinct_providers:
-        providers = {
-            results_by_slot[slot_number].reviewer_provider
-            for slot_number in range(1, required + 1)
-            if slot_number in results_by_slot
-            and results_by_slot[slot_number].reviewer_provider
-        }
-        if len(providers) < required:
-            missing.append(f"{stage.value}:provider-diversity")
-    return missing
-
-
-def _finding_action(finding: Finding) -> str | None:
+def _finding_action(
+    finding: Finding, *, budget_exhausted: bool = False
+) -> str | None:
     disposition = finding.disposition
     if finding.severity is Severity.P3:
         return None
@@ -114,6 +73,12 @@ def _finding_action(finding: Finding) -> str | None:
             return None
         return f"address_{finding.severity.value}"
 
+    if (
+        budget_exhausted
+        and finding.severity is Severity.P2
+        and disposition is Disposition.DEFER
+    ):
+        return None
     if disposition is None:
         return "fix_reproduced_p2" if finding.reproduction else "evaluate_p2"
     if disposition is Disposition.FIX_NOW:
@@ -197,8 +162,10 @@ def _p2_decline_supported(finding: Finding) -> bool:
     )
 
 
-def _finding_state(finding: Finding) -> FindingSettlementState:
-    if _finding_action(finding) is not None:
+def _finding_state(
+    finding: Finding, *, budget_exhausted: bool = False
+) -> FindingSettlementState:
+    if _finding_action(finding, budget_exhausted=budget_exhausted) is not None:
         return FindingSettlementState.UNRESOLVED
     if finding.disposition is Disposition.FIXED and finding.verification_passed:
         return FindingSettlementState.FIXED
@@ -217,34 +184,56 @@ def _finding_state(finding: Finding) -> FindingSettlementState:
 
 
 def _full_review_allowed(policy: ReviewPolicy, ledger: ReviewLedger) -> bool:
-    local_rounds = [
-        result.round_number
-        for result in ledger.results
-        if not result.stale and result.stage is ReviewStage.LOCAL
-    ]
-    last_round = max(local_rounds, default=0)
-    return last_round < policy.review.local.max_generation_rounds
+    return (
+        ledger.next_allowed_round(
+            stage=ReviewStage.LOCAL,
+            stage_policy=policy.review.local,
+        )
+        is not None
+    )
+
+
+def _defer_p2_at_budget_exhaustion(
+    *, policy: ReviewPolicy, ledger: ReviewLedger
+) -> None:
+    if _full_review_allowed(policy, ledger):
+        return
+    maximum = policy.review.local.max_generation_rounds
+    for finding in ledger.current_findings:
+        if finding.severity is not Severity.P2 or _finding_action(finding) is None:
+            continue
+        executions = ",".join(finding.contributing_execution_ids)
+        ledger.record_disposition(
+            fingerprint=finding.fingerprint,
+            disposition=Disposition.DEFER,
+            rationale=(
+                "review_budget_exhausted "
+                f"generation={maximum} max_generation_rounds={maximum} "
+                f"contributing_reviewer_execution_ids={executions}"
+            ),
+        )
 
 
 def evaluate(*, policy: ReviewPolicy, ledger: ReviewLedger) -> SettlementReport:
     """Apply reviewer quorum, severity, disposition, and budget rules."""
 
+    _defer_p2_at_budget_exhaustion(policy=policy, ledger=ledger)
+    budget_exhausted = not _full_review_allowed(policy, ledger)
+
     missing_slots = [
-        *_missing_for_stage(
+        *ledger.missing_slots_for_stage(
             stage=ReviewStage.LOCAL,
             stage_policy=policy.review.local,
-            ledger=ledger,
         ),
-        *_missing_for_stage(
+        *ledger.missing_slots_for_stage(
             stage=ReviewStage.BACKSTOP,
             stage_policy=policy.review.backstop,
-            ledger=ledger,
         ),
     ]
     required_actions: list[str] = []
     blocking_fingerprints: list[str] = []
     for finding in ledger.current_findings:
-        action = _finding_action(finding)
+        action = _finding_action(finding, budget_exhausted=budget_exhausted)
         if action is None:
             continue
         if action not in required_actions:
@@ -260,7 +249,10 @@ def evaluate(*, policy: ReviewPolicy, ledger: ReviewLedger) -> SettlementReport:
         required_actions=required_actions,
         blocking_fingerprints=blocking_fingerprints,
         finding_states={
-            finding.fingerprint: _finding_state(finding)
+            finding.fingerprint: _finding_state(
+                finding,
+                budget_exhausted=budget_exhausted,
+            )
             for finding in ledger.current_findings
         },
         missing_slots=missing_slots,

@@ -15,7 +15,7 @@ from .findings import (
     Reachability,
     Severity,
 )
-from .policy import ReviewStage
+from .policy import ReviewStage, ReviewStagePolicy
 
 _SEVERITY_RANK = {
     Severity.P3: 0,
@@ -23,6 +23,9 @@ _SEVERITY_RANK = {
     Severity.P1: 2,
     Severity.P0: 3,
 }
+
+# Quorum search is exact within this supported state budget; it never truncates.
+_MAX_QUORUM_SEARCH_STATES = 50_000
 
 
 def _merge_p2_evidence(
@@ -187,9 +190,11 @@ class ReviewLedger(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    version: Literal[1] = 1
+    version: Literal[2] = 2
     repository: str = Field(min_length=1)
     head_sha: str = Field(min_length=1)
+    delivery_id: str = Field(min_length=1)
+    review_charter_version: str = Field(min_length=1)
     results: list[ReviewResult] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
 
@@ -216,6 +221,251 @@ class ReviewLedger(BaseModel):
         """Canonical, deduplicated findings for the ledger's current head."""
 
         return self.findings
+
+    def next_allowed_round(
+        self,
+        *,
+        stage: ReviewStage,
+        stage_policy: ReviewStagePolicy,
+    ) -> int | None:
+        """Return the next generation number, or ``None`` when exhausted."""
+
+        required = stage_policy.required_results or stage_policy.reviewer_count
+        grouped: dict[int, dict[str, list[ReviewResult]]] = {}
+        for result in self.results:
+            if result.stage is stage:
+                grouped.setdefault(result.round_number, {}).setdefault(
+                    result.head_sha, []
+                ).append(result)
+
+        completed = {
+            round_number
+            for round_number, results_by_head in grouped.items()
+            if any(
+                not self._quorum_missing(
+                    stage=stage,
+                    results=results,
+                    required=required,
+                    stage_policy=stage_policy,
+                )
+                for results in results_by_head.values()
+            )
+        }
+        for round_number in range(1, stage_policy.max_generation_rounds + 1):
+            if round_number not in completed:
+                return round_number
+        return None
+
+    def missing_slots_for_stage(
+        self,
+        *,
+        stage: ReviewStage,
+        stage_policy: ReviewStagePolicy,
+    ) -> list[str]:
+        """Report current-head quorum gaps using monotonic candidate selection."""
+
+        results_by_round: dict[int, list[ReviewResult]] = {}
+        for result in self.results:
+            if not result.stale and result.stage is stage:
+                results_by_round.setdefault(result.round_number, []).append(result)
+        required = stage_policy.required_results or stage_policy.reviewer_count
+        if results_by_round:
+            current_round = max(results_by_round)
+            return self._quorum_missing(
+                stage=stage,
+                results=results_by_round[current_round],
+                required=required,
+                stage_policy=stage_policy,
+            )
+        return self._quorum_missing(
+            stage=stage,
+            results=[],
+            required=required,
+            stage_policy=stage_policy,
+        )
+
+    @staticmethod
+    def _quorum_missing(
+        *,
+        stage: ReviewStage,
+        results: list[ReviewResult],
+        required: int,
+        stage_policy: ReviewStagePolicy,
+    ) -> list[str]:
+        results_by_slot = [
+            [result for result in results if result.slot_number == slot_number]
+            for slot_number in range(1, required + 1)
+        ]
+        missing = [
+            f"{stage.value}:{slot_number}"
+            for slot_number, candidates in enumerate(results_by_slot, start=1)
+            if not candidates
+        ]
+        if missing:
+            if stage_policy.distinct_providers:
+                providers = {
+                    result.reviewer_provider
+                    for candidates in results_by_slot
+                    for result in candidates
+                    if result.reviewer_provider
+                }
+                if len(providers) < required:
+                    missing.append(f"{stage.value}:provider-diversity")
+            return missing
+        candidates_by_slot = [
+            list(
+                dict.fromkeys(
+                    (
+                        result.reviewer_execution_id,
+                        result.reviewer_provider,
+                    )
+                    for result in candidates
+                )
+            )
+            for candidates in results_by_slot
+        ]
+        if ReviewLedger._assignment_exists(
+            candidates_by_slot=candidates_by_slot,
+            distinct_executions=stage_policy.distinct_executions,
+            distinct_providers=stage_policy.distinct_providers,
+        ):
+            return []
+        execution_possible = ReviewLedger._assignment_exists(
+            candidates_by_slot=candidates_by_slot,
+            distinct_executions=stage_policy.distinct_executions,
+            distinct_providers=False,
+        )
+        provider_possible = ReviewLedger._assignment_exists(
+            candidates_by_slot=candidates_by_slot,
+            distinct_executions=False,
+            distinct_providers=stage_policy.distinct_providers,
+        )
+        missing = []
+        if stage_policy.distinct_executions and not execution_possible:
+            missing.append(f"{stage.value}:{required}")
+        if stage_policy.distinct_providers and not provider_possible:
+            missing.append(f"{stage.value}:provider-diversity")
+        if not missing:
+            missing.extend(
+                [f"{stage.value}:{required}", f"{stage.value}:provider-diversity"]
+            )
+        return missing
+
+    @staticmethod
+    def _assignment_exists(
+        *,
+        candidates_by_slot: list[list[tuple[str, str | None]]],
+        distinct_executions: bool,
+        distinct_providers: bool,
+    ) -> bool:
+        """Find one valid slot assignment without enumerating the full product."""
+
+        ordered = sorted(candidates_by_slot, key=len)
+        failed: set[tuple[int, frozenset[str], frozenset[str]]] = set()
+        visited_states = 0
+
+        def search(
+            index: int,
+            used_executions: frozenset[str],
+            used_providers: frozenset[str],
+        ) -> bool:
+            nonlocal visited_states
+            if index == len(ordered):
+                return True
+            state = (index, used_executions, used_providers)
+            if state in failed:
+                return False
+            if visited_states >= _MAX_QUORUM_SEARCH_STATES:
+                raise ValueError(
+                    "quorum candidate complexity exceeds supported search budget; "
+                    "reduce reviewer slots or retry candidates"
+                )
+            visited_states += 1
+            remaining = len(ordered) - index
+            if distinct_executions:
+                available_executions = {
+                    execution_id
+                    for candidates in ordered[index:]
+                    for execution_id, _ in candidates
+                    if execution_id not in used_executions
+                }
+                if len(available_executions) < remaining:
+                    failed.add(state)
+                    return False
+            if distinct_providers:
+                available_providers = {
+                    provider
+                    for candidates in ordered[index:]
+                    for _, provider in candidates
+                    if provider is not None and provider not in used_providers
+                }
+                if len(available_providers) < remaining:
+                    failed.add(state)
+                    return False
+            for execution_id, provider in ordered[index]:
+                if distinct_executions and execution_id in used_executions:
+                    continue
+                if distinct_providers and (
+                    provider is None or provider in used_providers
+                ):
+                    continue
+                if search(
+                    index + 1,
+                    (
+                        used_executions | {execution_id}
+                        if distinct_executions
+                        else used_executions
+                    ),
+                    (
+                        used_providers | {provider}
+                        if distinct_providers and provider is not None
+                        else used_providers
+                    ),
+                ):
+                    return True
+            failed.add(state)
+            return False
+
+        return search(0, frozenset(), frozenset())
+
+    def advance_head(self, head_sha: str) -> None:
+        """Advance to a descendant snapshot while retaining stale audit history."""
+
+        if not head_sha:
+            raise ValueError("head SHA is required")
+        if head_sha == self.head_sha:
+            raise ValueError("new head SHA must differ from current head SHA")
+        advanced_results = [
+            result.model_copy(
+                update={"stale": result.head_sha != head_sha},
+                deep=True,
+            )
+            for result in self.results
+        ]
+        advanced_findings = [
+            Finding.model_validate(
+                finding.model_dump()
+                | {
+                    "head_sha": head_sha,
+                    "fingerprint": "",
+                    "verification_passed": False,
+                }
+            )
+            for finding in self.findings
+        ]
+        merge_ledger = ReviewLedger(
+            repository=self.repository,
+            head_sha=head_sha,
+            delivery_id=self.delivery_id,
+            review_charter_version=self.review_charter_version,
+            findings=advanced_findings,
+        )
+        for result in advanced_results:
+            if not result.stale:
+                merge_ledger.submit(result)
+        self.results = advanced_results
+        self.findings = merge_ledger.findings
+        self.head_sha = head_sha
 
     def submit(self, result: ReviewResult) -> None:
         """Record one valid result and merge its current findings."""
