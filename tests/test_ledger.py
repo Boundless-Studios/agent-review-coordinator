@@ -73,6 +73,26 @@ def result(
 
 
 class ReviewLedgerTest(unittest.TestCase):
+    def test_protocol_v1_ledger_is_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            ReviewLedgerModel.model_validate(
+                {
+                    "version": 1,
+                    "repository": REPOSITORY,
+                    "head_sha": CURRENT_HEAD,
+                    "delivery_id": DELIVERY_ID,
+                    "review_charter_version": REVIEW_CHARTER_VERSION,
+                }
+            )
+
+    def test_protocol_v2_ledger_round_trips(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+
+        restored = ReviewLedgerModel.model_validate_json(ledger.model_dump_json())
+
+        self.assertEqual(restored.version, 2)
+        self.assertEqual(restored.model_dump(), ledger.model_dump())
+
     def test_adversarial_quorum_fails_fast_at_search_budget(self) -> None:
         stage_policy = ReviewPolicy.model_validate(
             {

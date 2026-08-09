@@ -153,6 +153,7 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(len(stored.results), 1)
+        self.assertEqual(json.loads(stdout)["version"], 2)
         self.assertEqual(json.loads(stdout)["head_sha"], HEAD)
         self.assertEqual(stored.delivery_id, DELIVERY_ID)
         self.assertEqual(stored.review_charter_version, REVIEW_CHARTER_VERSION)
