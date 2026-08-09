@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
@@ -72,6 +73,48 @@ def result(
 
 
 class ReviewLedgerTest(unittest.TestCase):
+    def test_large_quorum_does_not_enumerate_cartesian_product(self) -> None:
+        stage_policy = ReviewPolicy.model_validate(
+            {
+                "version": 1,
+                "review": {
+                    "local": {
+                        "reviewer_count": 8,
+                        "required_results": 8,
+                        "distinct_executions": True,
+                        "distinct_providers": True,
+                    },
+                    "backstop": {"reviewer_count": 1},
+                },
+            }
+        ).review.local
+        results = [
+            result(
+                execution_id=f"execution-{candidate}",
+                slot_number=slot,
+                findings=[],
+            ).model_copy(update={"reviewer_provider": f"provider-{candidate}"})
+            for slot in range(1, 9)
+            for candidate in range(10)
+        ]
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=CURRENT_HEAD,
+            results=results,
+        )
+
+        with patch(
+            "agent_review_coordinator.ledger.product",
+            create=True,
+            side_effect=AssertionError("Cartesian enumeration is forbidden"),
+        ):
+            missing = ledger.missing_slots_for_stage(
+                stage=ReviewStage.LOCAL,
+                stage_policy=stage_policy,
+            )
+
+        self.assertEqual(missing, [])
+
     def test_next_allowed_round_is_cumulative_across_heads(self) -> None:
         ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
         stage_policy = ReviewPolicy.model_validate(

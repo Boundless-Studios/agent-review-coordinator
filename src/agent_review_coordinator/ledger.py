@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from itertools import product
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -290,46 +289,54 @@ class ReviewLedger(BaseModel):
         required: int,
         stage_policy: ReviewStagePolicy,
     ) -> list[str]:
-        candidates_by_slot = [
+        results_by_slot = [
             [result for result in results if result.slot_number == slot_number]
             for slot_number in range(1, required + 1)
         ]
         missing = [
             f"{stage.value}:{slot_number}"
-            for slot_number, candidates in enumerate(candidates_by_slot, start=1)
+            for slot_number, candidates in enumerate(results_by_slot, start=1)
             if not candidates
         ]
         if missing:
             if stage_policy.distinct_providers:
                 providers = {
                     result.reviewer_provider
-                    for candidates in candidates_by_slot
+                    for candidates in results_by_slot
                     for result in candidates
                     if result.reviewer_provider
                 }
                 if len(providers) < required:
                     missing.append(f"{stage.value}:provider-diversity")
             return missing
-        execution_possible = not stage_policy.distinct_executions
-        provider_possible = not stage_policy.distinct_providers
-        for candidates in product(*candidates_by_slot):
-            execution_valid = len(
-                {result.reviewer_execution_id for result in candidates}
-            ) >= required
-            provider_valid = len(
-                {
-                    result.reviewer_provider
+        candidates_by_slot = [
+            list(
+                dict.fromkeys(
+                    (
+                        result.reviewer_execution_id,
+                        result.reviewer_provider,
+                    )
                     for result in candidates
-                    if result.reviewer_provider
-                }
-            ) >= required
-            execution_possible = execution_possible or execution_valid
-            provider_possible = provider_possible or provider_valid
-            if (
-                (not stage_policy.distinct_executions or execution_valid)
-                and (not stage_policy.distinct_providers or provider_valid)
-            ):
-                return []
+                )
+            )
+            for candidates in results_by_slot
+        ]
+        if ReviewLedger._assignment_exists(
+            candidates_by_slot=candidates_by_slot,
+            distinct_executions=stage_policy.distinct_executions,
+            distinct_providers=stage_policy.distinct_providers,
+        ):
+            return []
+        execution_possible = ReviewLedger._assignment_exists(
+            candidates_by_slot=candidates_by_slot,
+            distinct_executions=stage_policy.distinct_executions,
+            distinct_providers=False,
+        )
+        provider_possible = ReviewLedger._assignment_exists(
+            candidates_by_slot=candidates_by_slot,
+            distinct_executions=False,
+            distinct_providers=stage_policy.distinct_providers,
+        )
         missing = []
         if stage_policy.distinct_executions and not execution_possible:
             missing.append(f"{stage.value}:{required}")
@@ -340,6 +347,75 @@ class ReviewLedger(BaseModel):
                 [f"{stage.value}:{required}", f"{stage.value}:provider-diversity"]
             )
         return missing
+
+    @staticmethod
+    def _assignment_exists(
+        *,
+        candidates_by_slot: list[list[tuple[str, str | None]]],
+        distinct_executions: bool,
+        distinct_providers: bool,
+    ) -> bool:
+        """Find one valid slot assignment without enumerating the full product."""
+
+        ordered = sorted(candidates_by_slot, key=len)
+        failed: set[tuple[int, frozenset[str], frozenset[str]]] = set()
+
+        def search(
+            index: int,
+            used_executions: frozenset[str],
+            used_providers: frozenset[str],
+        ) -> bool:
+            if index == len(ordered):
+                return True
+            state = (index, used_executions, used_providers)
+            if state in failed:
+                return False
+            remaining = len(ordered) - index
+            if distinct_executions:
+                available_executions = {
+                    execution_id
+                    for candidates in ordered[index:]
+                    for execution_id, _ in candidates
+                    if execution_id not in used_executions
+                }
+                if len(available_executions) < remaining:
+                    failed.add(state)
+                    return False
+            if distinct_providers:
+                available_providers = {
+                    provider
+                    for candidates in ordered[index:]
+                    for _, provider in candidates
+                    if provider is not None and provider not in used_providers
+                }
+                if len(available_providers) < remaining:
+                    failed.add(state)
+                    return False
+            for execution_id, provider in ordered[index]:
+                if distinct_executions and execution_id in used_executions:
+                    continue
+                if distinct_providers and (
+                    provider is None or provider in used_providers
+                ):
+                    continue
+                if search(
+                    index + 1,
+                    (
+                        used_executions | {execution_id}
+                        if distinct_executions
+                        else used_executions
+                    ),
+                    (
+                        used_providers | {provider}
+                        if distinct_providers and provider is not None
+                        else used_providers
+                    ),
+                ):
+                    return True
+            failed.add(state)
+            return False
+
+        return search(0, frozenset(), frozenset())
 
     def advance_head(self, head_sha: str) -> None:
         """Advance to a descendant snapshot while retaining stale audit history."""
