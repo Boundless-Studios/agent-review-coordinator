@@ -1,5 +1,7 @@
 import unittest
 
+from pydantic import ValidationError
+
 from agent_review_coordinator.findings import (
     Disposition,
     EvidenceArtifact,
@@ -11,8 +13,12 @@ from agent_review_coordinator.findings import (
     Reachability,
     Severity,
 )
+from agent_review_coordinator.ledger import (
+    ArchitectureDecision,
+    ArchitectureDecisionKind,
+    ReviewResult,
+)
 from agent_review_coordinator.ledger import ReviewLedger as ReviewLedgerModel
-from agent_review_coordinator.ledger import ReviewResult
 from agent_review_coordinator.policy import ReviewPolicy, ReviewStage
 from agent_review_coordinator.settlement import FindingSettlementState, evaluate
 
@@ -146,6 +152,210 @@ def reviewed_ledger(item: Finding, *, round_number: int = 1) -> ReviewLedger:
 
 
 class SettlementTest(unittest.TestCase):
+    def _recurring_ledger(
+        self, severity: Severity = Severity.P2
+    ) -> tuple[ReviewLedger, str]:
+        source = finding(severity).model_dump()
+        first = Finding.model_validate(
+            source | {"head_sha": "a" * 40, "fingerprint": "", "lineage_id": ""}
+        )
+        second = Finding.model_validate(
+            source | {"head_sha": "b" * 40, "fingerprint": "", "lineage_id": ""}
+        )
+        results = [
+            ReviewResult(
+                repository=REPOSITORY,
+                head_sha=item.head_sha,
+                stage=ReviewStage.LOCAL,
+                round_number=round_number,
+                slot_number=1,
+                reviewer_execution_id=item.reviewer_execution_id,
+                findings=[item],
+                stale=True,
+            )
+            for item, round_number in ((first, 1), (second, 2))
+        ]
+        return (
+            ReviewLedger(repository=REPOSITORY, head_sha=HEAD, results=results),
+            first.lineage_id,
+        )
+
+    def test_backstop_round_does_not_fake_second_local_generation(self) -> None:
+        source = finding().model_dump()
+        local = Finding.model_validate(
+            source | {"head_sha": "a" * 40, "fingerprint": "", "lineage_id": ""}
+        )
+        backstop = Finding.model_validate(
+            source | {"head_sha": "b" * 40, "fingerprint": "", "lineage_id": ""}
+        )
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=HEAD,
+            results=[
+                ReviewResult(
+                    repository=REPOSITORY,
+                    head_sha=local.head_sha,
+                    stage=ReviewStage.LOCAL,
+                    round_number=2,
+                    slot_number=1,
+                    reviewer_execution_id=local.reviewer_execution_id,
+                    findings=[local],
+                    stale=True,
+                ),
+                ReviewResult(
+                    repository=REPOSITORY,
+                    head_sha=backstop.head_sha,
+                    stage=ReviewStage.BACKSTOP,
+                    round_number=1,
+                    slot_number=1,
+                    reviewer_execution_id=backstop.reviewer_execution_id,
+                    findings=[backstop],
+                    stale=True,
+                ),
+            ],
+        )
+
+        self.assertEqual(ledger.recurring_lineage_ids(), [])
+
+    def test_recurring_p3_does_not_block_settlement(self) -> None:
+        ledger, _ = self._recurring_ledger(Severity.P3)
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertNotIn(
+            "architecture_reevaluation_required", report.required_actions
+        )
+
+    def test_architecture_recurrence_disables_all_automated_review(self) -> None:
+        ledger, _ = self._recurring_ledger()
+
+        report = evaluate(policy=policy(max_rounds=3), ledger=ledger)
+
+        self.assertIn("architecture_reevaluation_required", report.required_actions)
+        self.assertFalse(report.allow_full_review)
+        self.assertFalse(report.allow_targeted_verification)
+
+    def test_architecture_decision_requires_current_recurrence(self) -> None:
+        item = finding()
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=HEAD)
+        ledger.submit(
+            result(stage=ReviewStage.LOCAL, findings=[item], execution_id="local-r1")
+        )
+        decision = ArchitectureDecision(
+            repository=REPOSITORY,
+            delivery_id=ledger.delivery_id,
+            review_charter_version=ledger.review_charter_version,
+            lineage_id=item.lineage_id,
+            decision=ArchitectureDecisionKind.EXPLICITLY_DEFERRED,
+            rationale="Not recurring yet.",
+            decided_by="human:owner",
+        )
+
+        with self.assertRaisesRegex(ValueError, "lineage is not recurring"):
+            ledger.record_architecture_decision(decision)
+        with self.assertRaisesRegex(ValidationError, "lineage is not recurring"):
+            ReviewLedger.model_validate(
+                ledger.model_dump() | {"architecture_decisions": [decision.model_dump()]}
+            )
+
+    def test_persisted_ledger_rejects_conflicting_decisions_for_one_lineage(
+        self,
+    ) -> None:
+        ledger, lineage_id = self._recurring_ledger()
+        decisions = [
+            ArchitectureDecision(
+                repository=REPOSITORY,
+                delivery_id=ledger.delivery_id,
+                review_charter_version=ledger.review_charter_version,
+                lineage_id=lineage_id,
+                decision=kind,
+                rationale="One auditable terminal decision is required.",
+                decided_by="human:owner",
+            ).model_dump()
+            for kind in (
+                ArchitectureDecisionKind.CORE_FIX_PLANNED,
+                ArchitectureDecisionKind.EXPLICITLY_DEFERRED,
+            )
+        ]
+
+        with self.assertRaisesRegex(
+            ValidationError, "multiple architecture decisions for one lineage"
+        ):
+            ReviewLedger.model_validate(
+                ledger.model_dump() | {"architecture_decisions": decisions}
+            )
+
+    def test_recurring_lineage_requires_one_architecture_decision(self) -> None:
+        source = finding().model_dump()
+        first = Finding.model_validate(
+            source | {"head_sha": "a" * 40, "fingerprint": "", "lineage_id": ""}
+        )
+        second = Finding.model_validate(
+            source | {"head_sha": "b" * 40, "fingerprint": "", "lineage_id": ""}
+        )
+        first_result = ReviewResult(
+            repository=REPOSITORY,
+            head_sha=first.head_sha,
+            stage=ReviewStage.LOCAL,
+            round_number=1,
+            slot_number=1,
+            reviewer_execution_id=first.reviewer_execution_id,
+            findings=[first],
+            stale=True,
+        )
+        second_result = ReviewResult(
+            repository=REPOSITORY,
+            head_sha=second.head_sha,
+            stage=ReviewStage.LOCAL,
+            round_number=2,
+            slot_number=1,
+            reviewer_execution_id=second.reviewer_execution_id,
+            findings=[second],
+            stale=True,
+        )
+        ledger = ReviewLedger(
+            repository=REPOSITORY,
+            head_sha=HEAD,
+            results=[first_result, second_result],
+        )
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertEqual(
+            report.required_actions, ["architecture_reevaluation_required"]
+        )
+        self.assertEqual(report.architecture_lineage_ids, [first.lineage_id])
+
+        ledger.record_architecture_decision(
+            ArchitectureDecision(
+                repository=REPOSITORY,
+                delivery_id=ledger.delivery_id,
+                review_charter_version=ledger.review_charter_version,
+                lineage_id=first.lineage_id,
+                decision=ArchitectureDecisionKind.EXPLICITLY_DEFERRED,
+                rationale="Bounded review found a core lifecycle redesign; defer it.",
+                decided_by="human:owner",
+            )
+        )
+        decided = evaluate(policy=policy(), ledger=ledger)
+        self.assertNotIn(
+            "architecture_reevaluation_required", decided.required_actions
+        )
+
+        ledger.record_architecture_decision(
+            ArchitectureDecision(
+                repository=REPOSITORY,
+                delivery_id=ledger.delivery_id,
+                review_charter_version=ledger.review_charter_version,
+                lineage_id=first.lineage_id,
+                decision=ArchitectureDecisionKind.CORE_FIX_PLANNED,
+                rationale="Replan the lifecycle boundary as a new delivery.",
+                decided_by="human:owner",
+            )
+        )
+        planned = evaluate(policy=policy(), ledger=ledger)
+        self.assertIn("architecture_core_fix_required", planned.required_actions)
+
     def test_later_retry_cannot_reintroduce_missing_slots_at_exhaustion(self) -> None:
         item = finding().model_copy(
             update={"p2_evidence": p2_evidence(security_risk=True)}

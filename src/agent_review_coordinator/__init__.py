@@ -11,8 +11,16 @@ from .findings import (
     Reachability,
     Severity,
     finding_fingerprint,
+    finding_lineage_id,
 )
-from .ledger import ReviewLedger, ReviewResult
+from .ledger import (
+    ArchitectureDecision,
+    ArchitectureDecisionKind,
+    HeadAttestation,
+    HeadAttestationKind,
+    ReviewLedger,
+    ReviewResult,
+)
 from .policy import (
     ReviewerSlot,
     ReviewPolicy,
@@ -22,15 +30,19 @@ from .policy import (
 )
 from .settlement import FindingSettlementState, SettlementReport, evaluate
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
+    "ArchitectureDecision",
+    "ArchitectureDecisionKind",
     "Disposition",
     "EvidenceArtifact",
     "EvidenceKind",
     "Finding",
     "FindingSettlementState",
     "FixCost",
+    "HeadAttestation",
+    "HeadAttestationKind",
     "Impact",
     "P2Evidence",
     "Reachability",
@@ -46,4 +58,5 @@ __all__ = [
     "__version__",
     "evaluate",
     "finding_fingerprint",
+    "finding_lineage_id",
 ]

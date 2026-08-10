@@ -69,6 +69,22 @@ reusing a completed round number on a descendant head does not create another
 generation. With `max_generation_rounds: 2`, completed rounds 1 and 2 exhaust
 full-review generation for the delivery.
 
+After the final generation, an adapter may advance to a descendant head without
+inventing another reviewer result. It records a typed `HeadAttestation` that
+references a head with completed local quorum, the exact descendant head, a
+delta SHA-256, and concrete evidence. The adapter remains responsible for
+proving Git ancestry and computing the diff hash. The coordinator accepts the
+attestation only for an exhausted delivery and uses it solely for local quorum;
+current-head backstop review and unresolved P0/P1 findings remain blocking.
+
+Findings also carry a snapshot-independent `lineage_id`. When one lineage is
+observed in both allowed generations or on three distinct heads, settlement
+returns `architecture_reevaluation_required` once. Automated fix/review cycling
+must stop until an `ArchitectureDecision` records `core_fix_planned`,
+`explicitly_deferred`, or `rejected`, with a nonempty actor and rationale. A new
+delivery budget is valid only for explicit core replanning, never merely because
+the head changed.
+
 Retrying the same provider and slot without new evidence is idempotent even when
 the adapter assigns a new execution ID or review round. It neither consumes
 another stored run nor creates another finding. Evidence merges monotonically:
