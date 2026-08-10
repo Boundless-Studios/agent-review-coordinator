@@ -85,6 +85,18 @@ must stop until an `ArchitectureDecision` records `core_fix_planned`,
 delivery budget is valid only for explicit core replanning, never merely because
 the head changed.
 
+CLI integrations record that terminal choice through the same locked, atomic
+ledger mutation path as dispositions and verification:
+
+```bash
+agent-review-coordinator architecture-decision \
+  --ledger .gaia/review-ledger.json \
+  --lineage-id <LINEAGE_ID> \
+  --decision explicitly_deferred \
+  --rationale "The lifecycle redesign is outside this bounded delivery." \
+  --decided-by "human:<OWNER>"
+```
+
 Retrying the same provider and slot without new evidence is idempotent even when
 the adapter assigns a new execution ID or review round. It neither consumes
 another stored run nor creates another finding. Evidence merges monotonically:

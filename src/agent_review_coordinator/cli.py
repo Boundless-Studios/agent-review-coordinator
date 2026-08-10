@@ -14,7 +14,12 @@ from pathlib import Path
 import yaml
 
 from .findings import Disposition
-from .ledger import ReviewLedger, ReviewResult
+from .ledger import (
+    ArchitectureDecision,
+    ArchitectureDecisionKind,
+    ReviewLedger,
+    ReviewResult,
+)
 from .policy import ReviewPolicy, ReviewStage
 from .settlement import evaluate
 
@@ -68,6 +73,17 @@ def _parser() -> argparse.ArgumentParser:
     verification.add_argument("--ledger", type=Path, required=True)
     verification.add_argument("--fingerprint", required=True)
     verification.add_argument("--passed", choices=["true", "false"], required=True)
+
+    architecture_decision = subparsers.add_parser("architecture-decision")
+    architecture_decision.add_argument("--ledger", type=Path, required=True)
+    architecture_decision.add_argument("--lineage-id", required=True)
+    architecture_decision.add_argument(
+        "--decision",
+        choices=[item.value for item in ArchitectureDecisionKind],
+        required=True,
+    )
+    architecture_decision.add_argument("--rationale", required=True)
+    architecture_decision.add_argument("--decided-by", required=True)
 
     settle = subparsers.add_parser("settle")
     settle.add_argument("--policy", type=Path, required=True)
@@ -211,6 +227,25 @@ def _verification(args: argparse.Namespace) -> int:
     return 0
 
 
+def _architecture_decision(args: argparse.Namespace) -> int:
+    with _ledger_lock(args.ledger):
+        ledger = _load_ledger(args.ledger)
+        ledger.record_architecture_decision(
+            ArchitectureDecision(
+                repository=ledger.repository,
+                delivery_id=ledger.delivery_id,
+                review_charter_version=ledger.review_charter_version,
+                lineage_id=args.lineage_id,
+                decision=ArchitectureDecisionKind(args.decision),
+                rationale=args.rationale,
+                decided_by=args.decided_by,
+            )
+        )
+        _write_ledger(args.ledger, ledger)
+    _print_json(ledger.model_dump(mode="json"))
+    return 0
+
+
 def _settle(args: argparse.Namespace) -> int:
     report = evaluate(
         policy=_load_policy(args.policy), ledger=_load_ledger(args.ledger)
@@ -231,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
             "disposition": _disposition,
             "reproduction": _reproduction,
             "verification": _verification,
+            "architecture-decision": _architecture_decision,
             "settle": _settle,
         }
         return commands[args.command](args)

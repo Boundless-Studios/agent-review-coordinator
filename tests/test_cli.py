@@ -66,6 +66,67 @@ def run_cli(argv: list[str]) -> tuple[int, str, str]:
 
 
 class CliTest(unittest.TestCase):
+    def test_architecture_decision_records_typed_terminal_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "ledger.json"
+            results = []
+            lineage_id = ""
+            for round_number, head_sha in ((1, "a" * 40), (2, "b" * 40)):
+                item = Finding(
+                    repository=REPOSITORY,
+                    head_sha=head_sha,
+                    reviewer_execution_id=f"local-r{round_number}",
+                    severity=Severity.P2,
+                    title="Repeated lifecycle leak",
+                    explanation="The same ownership boundary leaked again.",
+                    path="src/ledger.py",
+                    invariant="Lifecycle ownership must remain explicit",
+                )
+                lineage_id = item.lineage_id
+                results.append(
+                    ReviewResult(
+                        repository=REPOSITORY,
+                        head_sha=head_sha,
+                        stage=ReviewStage.LOCAL,
+                        round_number=round_number,
+                        slot_number=1,
+                        reviewer_execution_id=item.reviewer_execution_id,
+                        findings=[item],
+                        stale=True,
+                    )
+                )
+            ledger_path.write_text(
+                ReviewLedger(
+                    repository=REPOSITORY,
+                    head_sha=HEAD,
+                    results=results,
+                ).model_dump_json(),
+                encoding="utf-8",
+            )
+
+            code, stdout, stderr = run_cli(
+                [
+                    "architecture-decision",
+                    "--ledger",
+                    str(ledger_path),
+                    "--lineage-id",
+                    lineage_id,
+                    "--decision",
+                    "explicitly_deferred",
+                    "--rationale",
+                    "The core redesign is outside this bounded delivery.",
+                    "--decided-by",
+                    "human:owner",
+                ]
+            )
+            stored = ReviewLedger.model_validate_json(
+                ledger_path.read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(json.loads(stdout)["architecture_decisions"][0]["lineage_id"], lineage_id)
+        self.assertEqual(stored.architecture_decisions[0].decision.value, "explicitly_deferred")
+
     def test_requirements_print_versioned_provider_neutral_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             policy_path = Path(directory) / "policy.yaml"
