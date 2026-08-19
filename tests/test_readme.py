@@ -12,11 +12,11 @@ class ReadmeContractTest(unittest.TestCase):
         self.assertIn("Disposition.DEFER", readme)
         self.assertIn("P0 and P1", readme)
 
-    def test_package_versions_are_published_as_0_4_0(self) -> None:
+    def test_package_versions_are_published_as_0_5_0(self) -> None:
         root = Path(__file__).parents[1]
         pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertIn('version = "0.4.0"', pyproject)
+        self.assertIn('version = "0.5.0"', pyproject)
 
 
 if __name__ == "__main__":

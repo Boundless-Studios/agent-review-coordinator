@@ -768,6 +768,7 @@ class ReviewLedger(BaseModel):
         evidence: str | None = None,
         duplicate_of: str | None = None,
         deferred_to_issue: str | None = None,
+        p2_evidence: P2Evidence | None = None,
     ) -> None:
         """Apply an evidence-backed disposition to a current finding."""
 
@@ -802,6 +803,10 @@ class ReviewLedger(BaseModel):
             if deferred_to_issue and deferred_to_issue.strip()
             else None
         )
+        # Omitting the block leaves whatever a reviewer already submitted in
+        # place; a disposition is not the moment to erase decision inputs.
+        if p2_evidence is not None:
+            finding.p2_evidence = p2_evidence
 
     def record_reproduction(self, *, fingerprint: str, reproduction: str) -> None:
         """Attach reproduction evidence to a current finding."""

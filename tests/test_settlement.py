@@ -724,6 +724,109 @@ class SettlementTest(unittest.TestCase):
                 self.assertFalse(report.settled)
                 self.assertIn("evaluate_p2", report.required_actions)
 
+    def test_p2_disproof_settles_on_the_same_evidence_a_p1_disproof_needs(
+        self,
+    ) -> None:
+        """Declining a P2 must not be harder than declining a P1.
+
+        ``reject``, ``stale``, and ``wrong_owner`` answer whether the finding
+        is true, or whose code it is. A disproven finding has no honest
+        ``P2Evidence`` encoding at all -- ``_p2_decline_supported`` requires
+        ``fix_cost=architectural`` and ``_p2_requires_fix`` fires on
+        ``fix_cost=cheap``, and neither is a true statement about the cost of
+        fixing a defect that does not exist. Requiring the block here left
+        mislabelling the finding ``fixed`` as the only unblocking move.
+        """
+        for disposition in (
+            Disposition.REJECT,
+            Disposition.STALE,
+            Disposition.WRONG_OWNER,
+        ):
+            for severity in (Severity.P1, Severity.P2):
+                with self.subTest(disposition=disposition, severity=severity):
+                    if severity is Severity.P1 and (
+                        disposition is Disposition.WRONG_OWNER
+                    ):
+                        # wrong_owner has never settled a P0/P1; the parity
+                        # claim in this test is about reject and stale.
+                        continue
+                    ledger = reviewed_ledger(finding(severity))
+                    fingerprint = ledger.current_findings[0].fingerprint
+                    ledger.record_disposition(
+                        fingerprint=fingerprint,
+                        disposition=disposition,
+                        rationale="Premise disproven by reading the module.",
+                        evidence="hint_rephrase.py:166 defines the symbol.",
+                    )
+
+                    report = evaluate(policy=policy(), ledger=ledger)
+
+                    self.assertEqual(report.required_actions, [])
+                    self.assertEqual(
+                        report.finding_states[fingerprint],
+                        FindingSettlementState.DECLINED_WITH_RATIONALE,
+                    )
+
+    def test_p2_disproof_still_needs_evidence(self) -> None:
+        """The evidence string IS the audit trail, so its absence is fatal.
+
+        Settling on the bare disposition would let a finding be waved away
+        with no record of what disproved it, which is the failure mode the
+        structured gate was defending against.
+        """
+        for disposition in (
+            Disposition.REJECT,
+            Disposition.STALE,
+            Disposition.WRONG_OWNER,
+        ):
+            with self.subTest(disposition=disposition):
+                ledger = reviewed_ledger(finding())
+                fingerprint = ledger.current_findings[0].fingerprint
+                ledger.record_disposition(
+                    fingerprint=fingerprint,
+                    disposition=disposition,
+                    rationale="Looked wrong to me.",
+                )
+
+                report = evaluate(policy=policy(), ledger=ledger)
+
+                self.assertIn("evaluate_p2", report.required_actions)
+
+    def test_p2_disproof_cannot_outrank_a_reviewer_fix_signal(self) -> None:
+        """Structured evidence that the finding is real beats the disproof."""
+        item = finding().model_copy(
+            update={"p2_evidence": p2_evidence(security_risk=True)}
+        )
+        ledger = reviewed_ledger(item)
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.REJECT,
+            rationale="Premise disproven.",
+            evidence="The symbol is defined and the patch target is correct.",
+        )
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertIn("fix_p2", report.required_actions)
+
+    def test_defer_still_requires_structured_evidence(self) -> None:
+        """Deferring concedes the finding may be real, so it keeps the gate."""
+        ledger = reviewed_ledger(finding())
+        fingerprint = ledger.current_findings[0].fingerprint
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DEFER,
+            rationale="Cannot be observed inside this session.",
+            evidence="No reproduction available here.",
+        )
+
+        report = evaluate(policy=policy(), ledger=ledger)
+
+        self.assertFalse(report.settled)
+        self.assertIn("evaluate_p2", report.required_actions)
+
     def test_legacy_decline_cannot_override_a_fix_signal(self) -> None:
         item = finding().model_copy(
             update={"p2_evidence": p2_evidence(security_risk=True)}

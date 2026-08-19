@@ -13,7 +13,7 @@ from pathlib import Path
 
 import yaml
 
-from .findings import Disposition
+from .findings import Disposition, FixCost, Impact, P2Evidence, Reachability
 from .ledger import (
     ArchitectureDecision,
     ArchitectureDecisionKind,
@@ -63,6 +63,21 @@ def _parser() -> argparse.ArgumentParser:
     disposition.add_argument("--evidence")
     disposition.add_argument("--duplicate-of")
     disposition.add_argument("--deferred-to-issue")
+    # P2Evidence is frozen and forbids extras, so it is all-or-nothing: the
+    # risk flags have no defaults to fall back on, and store_true alone cannot
+    # tell "not supplied" from "supplied as false". Without these flags the
+    # block was reachable only from reviewer-submitted findings, which left
+    # every disposition that depends on it unsettleable in practice.
+    disposition.add_argument(
+        "--reachability", choices=[item.value for item in Reachability]
+    )
+    disposition.add_argument("--impact", choices=[item.value for item in Impact])
+    disposition.add_argument("--observed-recurrence", type=int)
+    disposition.add_argument("--fix-cost", choices=[item.value for item in FixCost])
+    disposition.add_argument("--interface-boundary-risk", choices=["true", "false"])
+    disposition.add_argument("--security-risk", choices=["true", "false"])
+    disposition.add_argument("--data-loss-risk", choices=["true", "false"])
+    disposition.add_argument("--durable-state-risk", choices=["true", "false"])
 
     reproduction = subparsers.add_parser("reproduction")
     reproduction.add_argument("--ledger", type=Path, required=True)
@@ -187,7 +202,44 @@ def _submit(args: argparse.Namespace) -> int:
     return 0
 
 
+_P2_EVIDENCE_FLAGS = (
+    "reachability",
+    "impact",
+    "observed_recurrence",
+    "fix_cost",
+    "interface_boundary_risk",
+    "security_risk",
+    "data_loss_risk",
+    "durable_state_risk",
+)
+
+
+def _p2_evidence(args: argparse.Namespace) -> P2Evidence | None:
+    """Build the decision-input block, or refuse a half-specified one."""
+
+    supplied = [name for name in _P2_EVIDENCE_FLAGS if getattr(args, name) is not None]
+    if not supplied:
+        return None
+    missing = [name for name in _P2_EVIDENCE_FLAGS if name not in supplied]
+    if missing:
+        raise ValueError(
+            "p2 evidence is all-or-nothing; missing "
+            + ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+        )
+    return P2Evidence(
+        reachability=Reachability(args.reachability),
+        impact=Impact(args.impact),
+        observed_recurrence=args.observed_recurrence,
+        fix_cost=FixCost(args.fix_cost),
+        interface_boundary_risk=args.interface_boundary_risk == "true",
+        security_risk=args.security_risk == "true",
+        data_loss_risk=args.data_loss_risk == "true",
+        durable_state_risk=args.durable_state_risk == "true",
+    )
+
+
 def _disposition(args: argparse.Namespace) -> int:
+    p2_evidence = _p2_evidence(args)
     with _ledger_lock(args.ledger):
         ledger = _load_ledger(args.ledger)
         ledger.record_disposition(
@@ -197,6 +249,7 @@ def _disposition(args: argparse.Namespace) -> int:
             evidence=args.evidence,
             duplicate_of=args.duplicate_of,
             deferred_to_issue=args.deferred_to_issue,
+            p2_evidence=p2_evidence,
         )
         _write_ledger(args.ledger, ledger)
     _print_json(ledger.model_dump(mode="json"))
