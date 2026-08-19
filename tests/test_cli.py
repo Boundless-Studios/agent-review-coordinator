@@ -306,6 +306,179 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(stored.findings[0].disposition.value, "defer")
 
+    def test_disposition_records_p2_evidence(self) -> None:
+        """Without CLI flags the block was reachable only from a reviewer.
+
+        Every disposition gated on ``p2_evidence`` was therefore unsettleable
+        in practice for any adapter that does not emit the block itself.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "ledger.json"
+            finding = Finding(
+                repository=REPOSITORY,
+                head_sha=HEAD,
+                reviewer_execution_id="local-r1-slot1",
+                severity=Severity.P2,
+                title="Do not synthesize green",
+                explanation="A missing check is treated as passing.",
+                path="scripts/review.py",
+                invariant="CI must be terminal",
+            )
+            ledger = ReviewLedger(
+                repository=REPOSITORY,
+                head_sha=HEAD,
+                findings=[finding],
+            )
+            ledger_path.write_text(ledger.model_dump_json(), encoding="utf-8")
+
+            code, _, _ = run_cli(
+                [
+                    "disposition",
+                    "--ledger",
+                    str(ledger_path),
+                    "--fingerprint",
+                    finding.fingerprint,
+                    "--disposition",
+                    "deferred_to_existing_issue",
+                    "--rationale",
+                    "Tracked by the owning redesign.",
+                    "--deferred-to-issue",
+                    "BOU-1234",
+                    "--reachability",
+                    "unknown",
+                    "--impact",
+                    "unknown",
+                    "--observed-recurrence",
+                    "0",
+                    "--fix-cost",
+                    "architectural",
+                    "--interface-boundary-risk",
+                    "false",
+                    "--security-risk",
+                    "false",
+                    "--data-loss-risk",
+                    "false",
+                    "--durable-state-risk",
+                    "true",
+                ]
+            )
+            stored = ReviewLedger.model_validate_json(
+                ledger_path.read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(code, 0)
+        recorded = stored.findings[0].p2_evidence
+        self.assertIsNotNone(recorded)
+        self.assertIs(recorded.reachability, Reachability.UNKNOWN)
+        self.assertIs(recorded.fix_cost, FixCost.ARCHITECTURAL)
+        self.assertTrue(recorded.durable_state_risk)
+        self.assertFalse(recorded.security_risk)
+
+    def test_partial_p2_evidence_is_refused(self) -> None:
+        """A half-specified block would silently invent decision inputs.
+
+        ``P2Evidence`` is frozen with no defaults, and ``store_true`` cannot
+        tell an unsupplied risk flag from one supplied as false, so the flags
+        are all-or-nothing rather than partially defaulted.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "ledger.json"
+            finding = Finding(
+                repository=REPOSITORY,
+                head_sha=HEAD,
+                reviewer_execution_id="local-r1-slot1",
+                severity=Severity.P2,
+                title="Do not synthesize green",
+                explanation="A missing check is treated as passing.",
+                path="scripts/review.py",
+                invariant="CI must be terminal",
+            )
+            ledger = ReviewLedger(
+                repository=REPOSITORY,
+                head_sha=HEAD,
+                findings=[finding],
+            )
+            ledger_path.write_text(ledger.model_dump_json(), encoding="utf-8")
+
+            code, _, stderr = run_cli(
+                [
+                    "disposition",
+                    "--ledger",
+                    str(ledger_path),
+                    "--fingerprint",
+                    finding.fingerprint,
+                    "--disposition",
+                    "defer",
+                    "--rationale",
+                    "Unsupported provider path.",
+                    "--reachability",
+                    "unreachable",
+                ]
+            )
+            stored = ReviewLedger.model_validate_json(
+                ledger_path.read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(code, 2)
+        self.assertIn("all-or-nothing", stderr)
+        self.assertIn("--fix-cost", stderr)
+        # The refusal is total: nothing was written.
+        self.assertIsNone(stored.findings[0].disposition)
+
+    def test_disposition_without_evidence_flags_preserves_existing_block(
+        self,
+    ) -> None:
+        """A disposition is not the moment to erase a reviewer's inputs."""
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "ledger.json"
+            finding = Finding(
+                repository=REPOSITORY,
+                head_sha=HEAD,
+                reviewer_execution_id="local-r1-slot1",
+                severity=Severity.P2,
+                title="Do not synthesize green",
+                explanation="A missing check is treated as passing.",
+                path="scripts/review.py",
+                invariant="CI must be terminal",
+                p2_evidence=P2Evidence(
+                    reachability=Reachability.SUPPORTED,
+                    impact=Impact.MEANINGFUL,
+                    observed_recurrence=2,
+                    interface_boundary_risk=False,
+                    security_risk=False,
+                    data_loss_risk=False,
+                    durable_state_risk=False,
+                    fix_cost=FixCost.CHEAP,
+                ),
+            )
+            ledger = ReviewLedger(
+                repository=REPOSITORY,
+                head_sha=HEAD,
+                findings=[finding],
+            )
+            ledger_path.write_text(ledger.model_dump_json(), encoding="utf-8")
+
+            code, _, _ = run_cli(
+                [
+                    "disposition",
+                    "--ledger",
+                    str(ledger_path),
+                    "--fingerprint",
+                    finding.fingerprint,
+                    "--disposition",
+                    "fix_now",
+                    "--rationale",
+                    "Reproduced on a supported path.",
+                ]
+            )
+            stored = ReviewLedger.model_validate_json(
+                ledger_path.read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIsNotNone(stored.findings[0].p2_evidence)
+        self.assertEqual(stored.findings[0].p2_evidence.observed_recurrence, 2)
+
     def test_cli_round_trips_evidence_and_existing_issue_deferral(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             ledger_path = Path(directory) / "ledger.json"

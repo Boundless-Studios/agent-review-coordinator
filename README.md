@@ -63,6 +63,19 @@ require a fix or an explicit deferral to existing work. Unsupported,
 unreachable, low-impact findings whose fix requires disproportionate
 architecture may be declined with rationale.
 
+Two questions are kept apart, because they need different evidence. *Is the
+finding true, and is it ours?* is answered by `reject`, `stale`, and
+`wrong_owner`; those settle any severity on a nonempty `evidence` string, and
+without one the finding stays unevaluated. *Do we accept this risk for now?* is
+answered by `defer`, `declined`, and `deferred_to_existing_issue`; those require
+the structured `P2Evidence` block, which is all-or-nothing. Requiring the
+structured block to reject a P2 made declining a P2 strictly harder than
+declining a P1 and left a disproven finding with no honest disposition at all —
+there is no true statement to make about the reachability or fix cost of a
+defect that does not exist, and the only unblocking move left was to mislabel it
+`fixed`. A `P2Evidence` block that says the finding *is* real still outranks a
+rejection and returns `fix_p2`.
+
 Review generation rounds are cumulative across every head in one delivery
 ledger. A round consumes budget only after its required slot quorum completes;
 reusing a completed round number on a descendant head does not create another
@@ -132,12 +145,29 @@ agent-review-coordinator submit \
   --review-charter-version "gaia-v1" \
   --result local-review-result.json
 
+# Is the finding true? Evidence string, any severity.
+agent-review-coordinator disposition \
+  --ledger review-ledger.json \
+  --fingerprint "$FINGERPRINT" \
+  --disposition reject \
+  --rationale "Premise disproven by reading the module." \
+  --evidence "hint_rephrase.py:166 defines the symbol; the patch target is correct."
+
+# Do we accept this risk for now? Structured block, all flags required.
 agent-review-coordinator disposition \
   --ledger review-ledger.json \
   --fingerprint "$FINGERPRINT" \
   --disposition deferred_to_existing_issue \
   --rationale "The durable-state redesign already owns this work." \
-  --deferred-to-issue BOU-1234
+  --deferred-to-issue BOU-1234 \
+  --reachability unknown \
+  --impact unknown \
+  --observed-recurrence 0 \
+  --fix-cost architectural \
+  --interface-boundary-risk false \
+  --security-risk false \
+  --data-loss-risk false \
+  --durable-state-risk true
 
 agent-review-coordinator reproduction \
   --ledger review-ledger.json \

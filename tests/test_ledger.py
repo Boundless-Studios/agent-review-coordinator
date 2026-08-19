@@ -1203,6 +1203,89 @@ class ReviewLedgerTest(unittest.TestCase):
                 rationale="The report is factually incorrect.",
             )
 
+    def test_recording_a_disposition_can_supply_p2_evidence(self) -> None:
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        ledger.submit(result())
+        fingerprint = ledger.current_findings[0].fingerprint
+
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DEFERRED_TO_EXISTING_ISSUE,
+            rationale="The owning redesign already tracks this.",
+            deferred_to_issue="BOU-1234",
+            p2_evidence=P2Evidence(
+                reachability=Reachability.UNKNOWN,
+                impact=Impact.UNKNOWN,
+                observed_recurrence=0,
+                interface_boundary_risk=False,
+                security_risk=False,
+                data_loss_risk=False,
+                durable_state_risk=True,
+                fix_cost=FixCost.ARCHITECTURAL,
+            ),
+        )
+
+        recorded = ledger.current_findings[0].p2_evidence
+        self.assertIsNotNone(recorded)
+        self.assertTrue(recorded.durable_state_risk)
+        # Recordable is the point: without the block this deferral could never
+        # settle, because nothing but a reviewer submission could supply it.
+        report = evaluate(
+            policy=ReviewPolicy.model_validate(
+                {
+                    "version": 1,
+                    "review": {
+                        "local": {"reviewer_count": 1, "required_results": 1},
+                        "backstop": {"reviewer_count": 1, "required_results": 1},
+                    },
+                }
+            ),
+            ledger=ledger,
+        )
+        self.assertEqual(report.required_actions, [])
+
+    def test_p2_evidence_on_a_p1_does_not_change_p1_settlement(self) -> None:
+        """The block is decision input, never a P0/P1 escape hatch."""
+        ledger = ReviewLedger(repository=REPOSITORY, head_sha=CURRENT_HEAD)
+        blocking = result().model_copy(
+            update={
+                "findings": [finding().model_copy(update={"severity": Severity.P1})]
+            }
+        )
+        ledger.submit(blocking)
+        fingerprint = ledger.current_findings[0].fingerprint
+
+        ledger.record_disposition(
+            fingerprint=fingerprint,
+            disposition=Disposition.DEFER,
+            rationale="Deferring a P1 is not a thing.",
+            p2_evidence=P2Evidence(
+                reachability=Reachability.UNREACHABLE,
+                impact=Impact.LOW,
+                observed_recurrence=0,
+                interface_boundary_risk=False,
+                security_risk=False,
+                data_loss_risk=False,
+                durable_state_risk=False,
+                fix_cost=FixCost.ARCHITECTURAL,
+            ),
+        )
+
+        self.assertIsNotNone(ledger.current_findings[0].p2_evidence)
+        report = evaluate(
+            policy=ReviewPolicy.model_validate(
+                {
+                    "version": 1,
+                    "review": {
+                        "local": {"reviewer_count": 1, "required_results": 1},
+                        "backstop": {"reviewer_count": 1, "required_results": 1},
+                    },
+                }
+            ),
+            ledger=ledger,
+        )
+        self.assertIn("address_p1", report.required_actions)
+
 
 if __name__ == "__main__":
     unittest.main()

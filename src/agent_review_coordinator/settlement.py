@@ -111,11 +111,29 @@ def _finding_action(
             else "evaluate_p2"
         )
     if disposition in {
-        Disposition.DEFER,
         Disposition.REJECT,
         Disposition.STALE,
         Disposition.WRONG_OWNER,
     }:
+        # These three answer whether the finding is true, or whose code it is.
+        # They are terminal answers, not judgments about tolerated risk, and
+        # the P0/P1 branch above already settles them on the evidence string
+        # alone. Demanding a structured ``P2Evidence`` block here made
+        # declining a P2 strictly harder than declining a P1 and left a
+        # disproven P2 with no honest disposition at all: there is no true
+        # statement to make about the fix cost or reachability of a defect
+        # that does not exist. A reviewer-supplied evidence block saying the
+        # finding IS real still outranks the decline.
+        if finding.p2_evidence is not None and _p2_requires_fix(finding):
+            return "fix_p2"
+        if finding.evidence and finding.evidence.strip():
+            return None
+        if finding.p2_evidence is None:
+            return "evaluate_p2"
+        return None if _p2_decline_supported(finding) else "evaluate_p2"
+    if disposition is Disposition.DEFER:
+        # Deferring IS a risk judgment -- it concedes the finding may be real
+        # and declines to act now -- so it keeps the structured evidence gate.
         if finding.p2_evidence is None:
             return "evaluate_p2"
         if _p2_requires_fix(finding):
